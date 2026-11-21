@@ -3,9 +3,11 @@
  * Enforces enrollment protection, saves last accessed lesson for seamless resume, and supports videos/PDF/exercises/quizzes
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { Lesson, CourseModule } from '../types';
+import { resolveVideoSource, isSupabaseStorageRef, fetchProtectedSignedMediaUrl } from '../lib/media';
+import { getSupabaseAccessToken } from '../lib/supabase';
 import {
   ArrowLeft,
   CheckCircle,
@@ -23,7 +25,9 @@ import {
   Maximize2,
   Sparkles,
   BookOpen,
-  Lock
+  Lock,
+  Loader2,
+  AlertCircle
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -41,6 +45,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
   const {
     courses,
     currentUser,
+    adminToken,
     isEnrolled,
     navigateTo,
     toggleLessonComplete,
@@ -81,6 +86,10 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
   const [exerciseSubmitted, setExerciseSubmitted] = useState(false);
   const [downloadFeedback, setDownloadFeedback] = useState<string | null>(null);
 
+  const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number>>({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
   const [quizScore, setQuizScore] = useState<{ score: number; total: number } | null>(null);
@@ -90,10 +99,87 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
   const currentModule = currentItem?.module;
 
   useEffect(() => {
+    const savedResumeId = currentUser?.lastAccessedLessonByCourse?.[course.id];
+    const targetId = initialLessonId || savedResumeId;
+    if (targetId) {
+      const idx = allLessons.findIndex((item) => item.lesson.id === targetId);
+      if (idx !== -1) {
+        setCurrentLessonIndex(idx);
+        return;
+      }
+    }
+    if (currentUser) {
+      const firstIncomplete = allLessons.findIndex(
+        (item) => !currentUser.completedLessonIds.includes(item.lesson.id)
+      );
+      setCurrentLessonIndex(firstIncomplete !== -1 ? firstIncomplete : 0);
+    } else {
+      setCurrentLessonIndex(0);
+    }
+  }, [courseId, initialLessonId]);
+
+  useEffect(() => {
+    if (!currentLesson) return;
+    const savedEx = currentUser?.submittedExercises?.[currentLesson.id];
+    setExerciseText(savedEx?.submissionText || '');
+    setExerciseLink(savedEx?.link || '');
+    setExerciseSubmitted(Boolean(savedEx));
+
+    const savedQuiz = currentUser?.quizScores?.[currentLesson.id];
+    setSelectedAnswers({});
+    setQuizSubmitted(Boolean(savedQuiz));
+    setQuizScore(savedQuiz ? { score: savedQuiz.score, total: savedQuiz.total } : null);
+    setDownloadFeedback(null);
+    setVideoError(null);
+  }, [currentLesson?.id]);
+
+  useEffect(() => {
     if (hasAccess && currentLesson) {
       setLastAccessedLesson(course.id, currentLesson.id);
     }
   }, [hasAccess, course.id, currentLesson?.id]);
+
+  const resolvedVideo = resolveVideoSource(currentLesson?.videoUrl);
+
+  const loadSignedVideo = useCallback(async () => {
+    if (resolvedVideo.kind !== 'supabase_storage') {
+      setSignedVideoUrl(null);
+      setVideoLoading(false);
+      return;
+    }
+    setVideoLoading(true);
+    setVideoError(null);
+    try {
+      const supabaseToken = await getSupabaseAccessToken();
+      const res = await fetchProtectedSignedMediaUrl({
+        bucket: 'course-videos',
+        path: resolvedVideo.path,
+        courseId: course.id,
+        supabaseToken,
+        adminToken
+      });
+      if (res.ok && res.signedUrl) {
+        setSignedVideoUrl(res.signedUrl);
+      } else {
+        setSignedVideoUrl(null);
+        setVideoError(res.error || 'Impossible de déverrouiller la vidéo privée sur Supabase Storage.');
+      }
+    } catch {
+      setSignedVideoUrl(null);
+      setVideoError('Erreur réseau lors de la récupération du lien vidéo sécurisé.');
+    } finally {
+      setVideoLoading(false);
+    }
+  }, [resolvedVideo.kind, resolvedVideo.kind === 'supabase_storage' ? resolvedVideo.path : '', course.id, adminToken]);
+
+  useEffect(() => {
+    if (hasAccess && resolvedVideo.kind === 'supabase_storage') {
+      loadSignedVideo();
+    } else {
+      setSignedVideoUrl(null);
+      setVideoLoading(false);
+    }
+  }, [hasAccess, currentLesson?.id, currentLesson?.videoUrl, loadSignedVideo]);
 
   // Strict Enrollment Protection Gate
   if (!hasAccess) {
@@ -207,7 +293,36 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
     submitQuizResult(currentLesson.id, correctCount, currentLesson.quiz.length);
   };
 
-  const handleDownloadResource = (resName: string, url?: string) => {
+  const handleDownloadResource = async (resName: string, url?: string) => {
+    const sbRef = isSupabaseStorageRef(url);
+    if (sbRef) {
+      setDownloadFeedback(`Génération du lien sécurisé pour « ${resName} »...`);
+      try {
+        const supabaseToken = await getSupabaseAccessToken();
+        const res = await fetchProtectedSignedMediaUrl({
+          bucket: sbRef.bucket,
+          path: sbRef.path,
+          courseId: course.id,
+          supabaseToken,
+          adminToken
+        });
+        if (res.ok && res.signedUrl) {
+          const link = document.createElement('a');
+          link.href = res.signedUrl;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.click();
+          setDownloadFeedback(`Ouverture sécurisée de « ${resName} ».`);
+        } else {
+          setDownloadFeedback(res.error || 'Accès refusé ou fichier introuvable dans Supabase Storage.');
+        }
+      } catch {
+        setDownloadFeedback('Erreur réseau lors de la récupération du PDF sécurisé.');
+      }
+      setTimeout(() => setDownloadFeedback(null), 4000);
+      return;
+    }
+
     if (url) {
       const link = document.createElement('a');
       link.href = url;
@@ -252,7 +367,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4 flex-wrap justify-end">
           <div className="hidden md:flex flex-col items-end w-44">
             <span className="text-[10px] text-zinc-400 font-mono tabular-nums">
               Progression : {progress.percentage}% ({progress.completedCount}/{progress.totalCount})
@@ -265,26 +380,27 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
             </div>
           </div>
 
-          {progress.percentage === 100 && (
+          {progress.percentage === 100 && course.certificateEligible && (
             <button
               onClick={() => onOpenCertificateModal(course.id)}
-              className="px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-[11px] sm:text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
             >
-              <Award className="w-4 h-4" />
-              <span>Mon Certificat Officiel</span>
+              <Award className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              <span className="hidden xs:inline sm:inline">Certificat</span>
+              <span className="hidden sm:inline">Officiel</span>
             </button>
           )}
 
           <button
             onClick={handleToggleComplete}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+            className={`px-2.5 sm:px-3.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
               isCompleted
                 ? 'bg-emerald-950 border border-emerald-500/60 text-emerald-300'
                 : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
             }`}
           >
-            <CheckCircle className={`w-4 h-4 ${isCompleted ? 'text-emerald-400' : 'text-zinc-500'}`} />
-            <span>{isCompleted ? 'Leçon terminée' : 'Marquer comme terminée'}</span>
+            <CheckCircle className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isCompleted ? 'text-emerald-400' : 'text-zinc-500'}`} />
+            <span>{isCompleted ? 'Terminée' : 'Marquer terminée'}</span>
           </button>
         </div>
       </div>
@@ -297,13 +413,77 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
           
           {/* Video Stage */}
           <div className="relative rounded-2xl overflow-hidden bg-black border border-zinc-800 shadow-2xl aspect-[16/9]">
-            {currentLesson.videoUrl ? (
-              <video
-                key={currentLesson.id}
-                src={currentLesson.videoUrl}
-                controls
-                className="w-full h-full object-cover"
-              />
+            {resolvedVideo.kind === 'supabase_storage' ? (
+              videoLoading ? (
+                <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-xs text-zinc-300 bg-zinc-950">
+                  <Loader2 className="w-8 h-8 text-[#D4AF37] animate-spin" />
+                  <span>Chargement sécurisé du flux vidéo depuis le cloud privé...</span>
+                </div>
+              ) : videoError ? (
+                <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6 text-center bg-zinc-950">
+                  <AlertCircle className="w-8 h-8 text-red-400" />
+                  <p className="text-xs text-red-300 max-w-md">{videoError}</p>
+                  <button
+                    onClick={loadSignedVideo}
+                    className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs cursor-pointer"
+                  >
+                    Réessayer le chargement
+                  </button>
+                </div>
+              ) : signedVideoUrl ? (
+                <video
+                  key={signedVideoUrl}
+                  src={signedVideoUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  controlsList="nodownload"
+                  onError={() =>
+                    setVideoError('La lecture de ce fichier vidéo a échoué sur cet appareil. Vérifiez le format MP4/H.264.')
+                  }
+                  className="w-full h-full object-contain bg-black"
+                />
+              ) : null
+            ) : resolvedVideo.kind === 'iframe' ? (
+              <div className="relative w-full h-full">
+                <iframe
+                  key={resolvedVideo.embedUrl}
+                  src={resolvedVideo.embedUrl}
+                  title={currentLesson.title}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                  allowFullScreen
+                  className="w-full h-full border-0"
+                />
+                <span className="absolute top-3 right-3 px-2 py-0.5 rounded bg-black/75 border border-zinc-700 text-[10px] text-zinc-300 pointer-events-none">
+                  {resolvedVideo.providerLabel}
+                </span>
+              </div>
+            ) : resolvedVideo.kind === 'video' ? (
+              videoError ? (
+                <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6 text-center bg-zinc-950">
+                  <AlertCircle className="w-8 h-8 text-red-400" />
+                  <p className="text-xs text-red-300 max-w-md">{videoError}</p>
+                  <button
+                    onClick={() => setVideoError(null)}
+                    className="px-4 py-2 rounded-lg bg-zinc-800 text-slate-200 font-semibold text-xs cursor-pointer"
+                  >
+                    Recharger le lecteur
+                  </button>
+                </div>
+              ) : (
+                <video
+                  key={resolvedVideo.url}
+                  src={resolvedVideo.url}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  controlsList="nodownload"
+                  onError={() =>
+                    setVideoError('Impossible de lire le flux vidéo externe. Vérifiez que le lien pointe vers un MP4/WebM accessible.')
+                  }
+                  className="w-full h-full object-contain bg-black"
+                />
+              )
             ) : (
               <>
                 <div className="absolute inset-0 flex items-center justify-center">

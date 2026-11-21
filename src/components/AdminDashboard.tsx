@@ -4,9 +4,12 @@
  * Manages courses, curriculum modules/lessons, domains, students, orders, promos, coaching, agency logo, testimonials, and payment status
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { Course, CourseModule, Lesson } from '../types';
+import { getSupabaseAccessToken } from '../lib/supabase';
+import { createPreMigrationBackup, loadStoredBackupMeta } from '../lib/migration';
+import { LaunchCenter } from './LaunchCenter';
 import {
   ShieldCheck,
   BookOpen,
@@ -26,8 +29,22 @@ import {
   MessageSquareQuote,
   RefreshCw,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  ArrowUp,
+  ArrowDown,
+  UploadCloud,
+  Database,
+  RotateCcw,
+  Rocket
 } from 'lucide-react';
+
+const escapeHtmlText = (str: string) =>
+  str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 export const AdminDashboard: React.FC = () => {
   const {
@@ -41,6 +58,8 @@ export const AdminDashboard: React.FC = () => {
     orders,
     coachingRequests,
     paymentConfig,
+    infraStatus,
+    adminToken,
     formatPrice,
     saveCourse,
     deleteCourse,
@@ -53,17 +72,25 @@ export const AdminDashboard: React.FC = () => {
     deleteTestimonial,
     updateSiteSettings,
     updateOrderStatus,
+    refundOrderServer,
     updateCoachingStatus,
     grantManualCourseAccess,
     revokeCourseAccess,
     refreshServerPaymentStatus,
+    migrateLocalCatalogToCloud,
+    refreshSupabaseAdminData,
     currentUser,
+    adminSessionExpiredNotice,
+    dismissAdminSessionExpiredNotice,
     openAuthModal
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'courses' | 'students' | 'orders' | 'coaching' | 'settings'
+    'overview' | 'launch-center' | 'courses' | 'students' | 'orders' | 'coaching' | 'settings'
   >('overview');
+
+  // Confirmation state for destructive deletes
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   // Course editing state
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
@@ -71,8 +98,22 @@ export const AdminDashboard: React.FC = () => {
   const [newModTitle, setNewModTitle] = useState('');
   const [newModDesc, setNewModDesc] = useState('');
   const [lessonDraftByMod, setLessonDraftByMod] = useState<
-    Record<string, { title: string; duration: string; videoUrl: string; summary: string }>
+    Record<
+      string,
+      {
+        title: string;
+        duration: string;
+        videoUrl: string;
+        summary: string;
+        pdfName: string;
+        pdfUrl: string;
+        exTitle: string;
+        exInstructions: string;
+        exCorrection: string;
+      }
+    >
   >({});
+  const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
 
   // New Domain form
   const [newDomainTitle, setNewDomainTitle] = useState('');
@@ -92,6 +133,17 @@ export const AdminDashboard: React.FC = () => {
   const [testCourse, setTestCourse] = useState(courses[0]?.title || '');
   const [testQuote, setTestQuote] = useState('');
 
+  // Cloud infrastructure, upload & refund feedback states
+  const [confirmRefundOrderId, setConfirmRefundOrderId] = useState<string | null>(null);
+  const [refundNotice, setRefundNotice] = useState<string | null>(null);
+  const [migratingCloud, setMigratingCloud] = useState(false);
+  const [migrationFeedback, setMigrationFeedback] = useState<{ ok: boolean; message: string } | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSettingsForm(siteSettings);
+  }, [siteSettings]);
+
   // Strict security gate
   if (!currentUser || currentUser.role !== 'admin') {
     return (
@@ -102,11 +154,19 @@ export const AdminDashboard: React.FC = () => {
         <h2 className="font-brand text-2xl font-bold text-slate-100">
           Espace Réservé à la Direction
         </h2>
+        {adminSessionExpiredNotice && (
+          <div className="p-3.5 rounded-xl bg-amber-950/60 border border-[#D4AF37]/50 text-xs text-[#F3E5AB] leading-relaxed text-left">
+            {adminSessionExpiredNotice}
+          </div>
+        )}
         <p className="text-xs text-zinc-400 leading-relaxed">
           Aucun visiteur ni compte apprenant ordinaire ne peut accéder à cet espace. Veuillez vous authentifier avec les identifiants de Direction de Faith Ariola.
         </p>
         <button
-          onClick={() => openAuthModal('admin')}
+          onClick={() => {
+            dismissAdminSessionExpiredNotice();
+            openAuthModal('admin');
+          }}
           className="px-6 py-3 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider cursor-pointer"
         >
           Connexion Administratrice
@@ -139,10 +199,11 @@ export const AdminDashboard: React.FC = () => {
     saveCourse({
       ...editingCourse,
       modulesCount: editingCourse.modules.length,
-      lessonsCount: totalLessons || editingCourse.lessonsCount
+      lessonsCount: totalLessons
     });
     setShowCourseModal(false);
     setEditingCourse(null);
+    setEditingLessonId(null);
   };
 
   const handleAddModuleToCourse = () => {
@@ -159,11 +220,53 @@ export const AdminDashboard: React.FC = () => {
     setNewModDesc('');
   };
 
+  const handleMoveModule = (index: number, dir: -1 | 1) => {
+    if (!editingCourse) return;
+    const target = index + dir;
+    if (target < 0 || target >= editingCourse.modules.length) return;
+    const copy = [...editingCourse.modules];
+    const [moved] = copy.splice(index, 1);
+    copy.splice(target, 0, moved);
+    setEditingCourse({
+      ...editingCourse,
+      modules: copy.map((m, idx) => ({ ...m, order: idx + 1 }))
+    });
+  };
+
+  const handleMoveLesson = (modId: string, index: number, dir: -1 | 1) => {
+    if (!editingCourse) return;
+    setEditingCourse({
+      ...editingCourse,
+      modules: editingCourse.modules.map((m) => {
+        if (m.id !== modId) return m;
+        const target = index + dir;
+        if (target < 0 || target >= m.lessons.length) return m;
+        const copy = [...m.lessons];
+        const [moved] = copy.splice(index, 1);
+        copy.splice(target, 0, moved);
+        return { ...m, lessons: copy };
+      })
+    });
+  };
+
+  const emptyDraft = {
+    title: '',
+    duration: '',
+    videoUrl: '',
+    summary: '',
+    pdfName: '',
+    pdfUrl: '',
+    exTitle: '',
+    exInstructions: '',
+    exCorrection: ''
+  };
+
   const handleAddLessonToModule = (modId: string) => {
     if (!editingCourse) return;
     const draft = lessonDraftByMod[modId];
     if (!draft || !draft.title.trim()) return;
 
+    const safeSummary = escapeHtmlText(draft.summary.trim() || 'Contenu pédagogique pratique.');
     const newLesson: Lesson = {
       id: `les-${Date.now()}`,
       moduleId: modId,
@@ -172,8 +275,28 @@ export const AdminDashboard: React.FC = () => {
       type: 'video',
       videoUrl: draft.videoUrl.trim() || undefined,
       summary: draft.summary.trim() || 'Contenu pédagogique pratique.',
-      contentHtml: `<p>${draft.summary.trim() || 'Contenu de la leçon.'}</p>`,
-      keyTakeaways: []
+      contentHtml: `<p>${safeSummary}</p>`,
+      keyTakeaways: [],
+      downloads: draft.pdfName.trim()
+        ? [
+            {
+              name: draft.pdfName.trim(),
+              type: 'PDF',
+              size: 'Support',
+              description: 'Document pédagogique de la leçon',
+              url: draft.pdfUrl.trim() || undefined
+            }
+          ]
+        : undefined,
+      exercise: draft.exTitle.trim()
+        ? {
+            title: draft.exTitle.trim(),
+            instructions: draft.exInstructions.trim() || 'Réalisez cet exercice pratique et soumettez votre rendu.',
+            deliverable: 'Rendu textuel ou lien vers votre création',
+            criteria: ['Application des consignes de la leçon', 'Qualité et cohérence du résultat'],
+            modelCorrection: draft.exCorrection.trim() || 'Correction disponible après soumission.'
+          }
+        : undefined
     };
 
     setEditingCourse({
@@ -184,13 +307,68 @@ export const AdminDashboard: React.FC = () => {
     });
     setLessonDraftByMod((prev) => ({
       ...prev,
-      [modId]: { title: '', duration: '', videoUrl: '', summary: '' }
+      [modId]: { ...emptyDraft }
     }));
   };
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const uploadMediaToCloud = async (
+    bucket: 'course-videos' | 'course-pdfs' | 'brand-assets',
+    file: File,
+    folderPrefix: string
+  ): Promise<string | null> => {
+    setUploadStatus(`Préparation du téléversement de « ${file.name} »...`);
+    try {
+      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = `${folderPrefix}/${Date.now()}_${cleanName}`;
+      const supabaseToken = await getSupabaseAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+      if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
+
+      const res = await fetch('/api/media/upload-url', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ bucket, filePath })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.signedUrl) {
+        setUploadStatus(data.error || 'Supabase Storage non configuré côté serveur (utilisez un lien externe).');
+        return null;
+      }
+
+      setUploadStatus(`Téléversement cloud en cours (${(file.size / (1024 * 1024)).toFixed(1)} Mo)...`);
+      const uploadRes = await fetch(data.signedUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file
+      });
+      if (!uploadRes.ok) {
+        setUploadStatus('Échec du transfert vers Supabase Storage.');
+        return null;
+      }
+
+      setUploadStatus(`✓ Fichier téléversé dans ${bucket} (${data.storageRef}).`);
+      return data.storageRef as string;
+    } catch {
+      setUploadStatus('Erreur réseau pendant le téléversement cloud.');
+      return null;
+    }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (infraStatus?.supabase.serverConnected) {
+      const cloudUrl = await uploadMediaToCloud('brand-assets', file, 'logos');
+      if (cloudUrl) {
+        const updated = { ...settingsForm, agencyLogoDataUrl: cloudUrl };
+        setSettingsForm(updated);
+        updateSiteSettings(updated);
+        return;
+      }
+    }
+
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = typeof reader.result === 'string' ? reader.result : null;
@@ -238,7 +416,19 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setActiveTab('launch-center')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'launch-center'
+                  ? 'bg-[#D4AF37] text-zinc-950'
+                  : 'bg-[#D4AF37]/15 hover:bg-[#D4AF37]/25 text-[#F3E5AB] border border-[#D4AF37]/40'
+              }`}
+            >
+              <Rocket className="w-3.5 h-3.5" />
+              <span>Centre de lancement</span>
+            </button>
             <span
               className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase ${
                 paymentConfig.serverConfigured
@@ -257,6 +447,7 @@ export const AdminDashboard: React.FC = () => {
         <div className="flex items-center gap-2 p-1.5 bg-zinc-900/80 rounded-xl border border-zinc-800 overflow-x-auto no-scrollbar">
           {[
             { id: 'overview', label: 'Vue d’ensemble', icon: TrendingUp },
+            { id: 'launch-center', label: 'Centre de lancement', icon: Rocket },
             { id: 'courses', label: `Formations & Catégories (${courses.length})`, icon: BookOpen },
             { id: 'students', label: `Apprenants (${students.length})`, icon: Users },
             { id: 'orders', label: `Commandes & Promos (${orders.length})`, icon: DollarSign },
@@ -278,6 +469,11 @@ export const AdminDashboard: React.FC = () => {
             );
           })}
         </div>
+
+        {/* TAB LAUNCH CENTER */}
+        {activeTab === 'launch-center' && (
+          <LaunchCenter onNavigateAdminTab={(tab) => setActiveTab(tab)} />
+        )}
 
         {/* TAB 1: OVERVIEW */}
         {activeTab === 'overview' && (
@@ -374,8 +570,8 @@ export const AdminDashboard: React.FC = () => {
                       domain: domains[0]?.id || 'video_ads_ai',
                       level: 'Tous niveaux',
                       duration: '12 heures',
-                      modulesCount: 1,
-                      lessonsCount: 1,
+                      modulesCount: 0,
+                      lessonsCount: 0,
                       priceXOF: 75000,
                       priceEUR: 115,
                       priceUSD: 125,
@@ -448,13 +644,33 @@ export const AdminDashboard: React.FC = () => {
                       >
                         {c.isPublished ? 'Dépublier' : 'Publier'}
                       </button>
-                      <button
-                        onClick={() => deleteCourse(c.id)}
-                        className="p-1.5 rounded-lg text-red-400 hover:bg-red-950/40 cursor-pointer"
-                        title="Supprimer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {confirmDeleteKey === `course-${c.id}` ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => {
+                              deleteCourse(c.id);
+                              setConfirmDeleteKey(null);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-red-600 text-white text-[11px] font-bold cursor-pointer"
+                          >
+                            Confirmer
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteKey(null)}
+                            className="px-2 py-1.5 rounded-lg bg-zinc-800 text-zinc-300 text-[11px] cursor-pointer"
+                          >
+                            Annuler
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDeleteKey(`course-${c.id}`)}
+                          className="p-1.5 rounded-lg text-red-400 hover:bg-red-950/40 cursor-pointer"
+                          title="Supprimer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -483,13 +699,33 @@ export const AdminDashboard: React.FC = () => {
                       <span className="text-zinc-400 text-[11px] block mt-0.5">{dom.description}</span>
                     </div>
                     {domains.length > 1 && (
-                      <button
-                        onClick={() => deleteDomain(dom.id)}
-                        className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
-                        title="Supprimer cette catégorie"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      confirmDeleteKey === `dom-${dom.id}` ? (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => {
+                              deleteDomain(dom.id);
+                              setConfirmDeleteKey(null);
+                            }}
+                            className="px-2 py-1 rounded bg-red-600 text-white text-[10px] font-bold cursor-pointer"
+                          >
+                            Confirmer
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteKey(null)}
+                            className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 text-[10px] cursor-pointer"
+                          >
+                            Annuler
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDeleteKey(`dom-${dom.id}`)}
+                          className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
+                          title="Supprimer cette catégorie"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )
                     )}
                   </div>
                 ))}
@@ -625,6 +861,15 @@ export const AdminDashboard: React.FC = () => {
               </select>
             </div>
 
+            {refundNotice && (
+              <div className="p-3 rounded-xl bg-zinc-900 border border-[#D4AF37]/40 text-xs text-[#F3E5AB] flex items-center justify-between">
+                <span>{refundNotice}</span>
+                <button onClick={() => setRefundNotice(null)} className="text-zinc-400 hover:text-white cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             <div className="rounded-2xl bg-zinc-950 border border-zinc-800 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
@@ -637,7 +882,7 @@ export const AdminDashboard: React.FC = () => {
                       <th className="p-4">Prestataire</th>
                       <th className="p-4">Montant</th>
                       <th className="p-4">Statut</th>
-                      <th className="p-4">Reçu</th>
+                      <th className="p-4">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-900">
@@ -661,7 +906,7 @@ export const AdminDashboard: React.FC = () => {
                           {ord.paymentMethod.toUpperCase()} ({ord.paymentProvider})
                         </td>
                         <td className="p-4 font-mono font-bold text-[#D4AF37] tabular-nums">
-                          {ord.amount} {ord.currency}
+                          {ord.amount.toLocaleString('fr-FR')} {ord.currency}
                         </td>
                         <td className="p-4">
                           <select
@@ -678,13 +923,47 @@ export const AdminDashboard: React.FC = () => {
                           </select>
                         </td>
                         <td className="p-4">
-                          <button
-                            onClick={() => window.print()}
-                            className="text-xs text-[#D4AF37] hover:underline flex items-center gap-1 cursor-pointer"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                            <span>Reçu</span>
-                          </button>
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={() => window.print()}
+                              className="text-xs text-[#D4AF37] hover:underline flex items-center gap-1 cursor-pointer"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              <span>Reçu</span>
+                            </button>
+
+                            {ord.status === 'confirmed' && (
+                              confirmRefundOrderId === ord.id ? (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={async () => {
+                                      const res = await refundOrderServer(ord.id);
+                                      setRefundNotice(res.message || 'Remboursement traité.');
+                                      setConfirmRefundOrderId(null);
+                                    }}
+                                    className="px-2 py-1 rounded bg-red-600 text-white text-[10px] font-bold cursor-pointer"
+                                  >
+                                    Confirmer
+                                  </button>
+                                  <button
+                                    onClick={() => setConfirmRefundOrderId(null)}
+                                    className="px-1.5 py-1 rounded bg-zinc-800 text-zinc-300 text-[10px] cursor-pointer"
+                                  >
+                                    Annuler
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setConfirmRefundOrderId(ord.id)}
+                                  className="text-[11px] text-red-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                  title="Rembourser et révoquer l'accès"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  <span>Rembourser</span>
+                                </button>
+                              )
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -861,7 +1140,7 @@ export const AdminDashboard: React.FC = () => {
                           updateCoachingStatus(req.id, req.status, e.target.value);
                         }
                       }}
-                      className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100 w-72"
+                      className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100 w-full sm:w-72"
                     />
                   </div>
                 </div>
@@ -874,6 +1153,145 @@ export const AdminDashboard: React.FC = () => {
         {activeTab === 'settings' && (
           <div className="space-y-8">
             
+            {/* 0. Infrastructure Cloud Supabase & Déploiement */}
+            <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-2.5">
+                  <Database className="w-5 h-5 text-[#D4AF37]" />
+                  <div>
+                    <h2 className="font-brand text-xl font-bold text-slate-100">
+                      Infrastructure Cloud Supabase, Stockage & Déploiement
+                    </h2>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      État réel de connexion détecté par le serveur DJIFFA ACADEMY.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshServerPaymentStatus}
+                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer self-start"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Vérifier l’état</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
+                  <span className="text-zinc-400 block">Base PostgreSQL & Auth Supabase</span>
+                  <strong className={infraStatus?.supabase.configured ? 'text-emerald-400' : 'text-amber-300'}>
+                    {infraStatus?.supabase.configured
+                      ? '✓ Connecté (Serveur + Navigateur)'
+                      : 'Non configuré (Mode Local actif)'}
+                  </strong>
+                  <p className="text-[11px] text-zinc-500">
+                    Variables requises : VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
+                  <span className="text-zinc-400 block">Stockage Vidéos & PDF Privés</span>
+                  <strong className={infraStatus?.supabase.serverConnected ? 'text-emerald-400' : 'text-zinc-300'}>
+                    {infraStatus?.supabase.serverConnected
+                      ? '✓ Buckets actifs (URL signées)'
+                      : 'Liens externes actifs / Storage prêt'}
+                  </strong>
+                  <p className="text-[11px] text-zinc-500">
+                    Buckets : brand-assets, course-pdfs, course-videos (+ Bunny/Cloudflare/Vimeo)
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
+                  <span className="text-zinc-400 block">Sécurité Espace Direction</span>
+                  <strong className={infraStatus?.adminSecurity.customCodeConfigured ? 'text-emerald-400' : 'text-amber-300'}>
+                    {infraStatus?.adminSecurity.customCodeConfigured
+                      ? '✓ Code secret personnalisé actif'
+                      : 'Mode démo (DJIFFA-ADMIN)'}
+                  </strong>
+                  <p className="text-[11px] text-zinc-500">
+                    Définissez ADMIN_ACCESS_CODE et ADMIN_SESSION_SECRET en production.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const meta = createPreMigrationBackup({
+                      domains,
+                      courses,
+                      promoCodes,
+                      coachingPrograms,
+                      testimonials,
+                      siteSettings,
+                      students,
+                      orders,
+                      coachingRequests
+                    });
+                    setMigrationFeedback({
+                      ok: true,
+                      message: `✓ Sauvegarde locale téléchargée (${meta.fileName}). Vous pouvez maintenant vérifier la connexion ou migrer sans écrasement.`
+                    });
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-slate-100 font-semibold text-xs flex items-center gap-2 cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-[#D4AF37]" />
+                  <span>Préparer une sauvegarde (.json)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={migratingCloud || !infraStatus?.supabase.serverConnected}
+                  onClick={async () => {
+                    if (!loadStoredBackupMeta()) {
+                      setMigrationFeedback({
+                        ok: false,
+                        message: 'Préparez d’abord une sauvegarde JSON locale avant de lancer la migration vers Supabase.'
+                      });
+                      return;
+                    }
+                    setMigratingCloud(true);
+                    setMigrationFeedback(null);
+                    try {
+                      const res = await migrateLocalCatalogToCloud();
+                      setMigrationFeedback(res);
+                    } finally {
+                      setMigratingCloud(false);
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>{migratingCloud ? 'Migration en cours...' : 'Migrer mes données locales vers Supabase'}</span>
+                </button>
+
+                {infraStatus?.supabase.serverConnected && (
+                  <button
+                    type="button"
+                    onClick={refreshSupabaseAdminData}
+                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Synchroniser apprenants & commandes Supabase</span>
+                  </button>
+                )}
+              </div>
+
+              {migrationFeedback && (
+                <div
+                  className={`p-3 rounded-lg text-xs border ${
+                    migrationFeedback.ok
+                      ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+                      : 'bg-red-950/60 border-red-800 text-red-200'
+                  }`}
+                >
+                  {migrationFeedback.message}
+                </div>
+              )}
+            </div>
+
             {/* 1. Official Logo Import & Contact Info */}
             <form onSubmit={handleSaveSettings} className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-6">
               <div className="flex items-center gap-2">
@@ -974,7 +1392,7 @@ export const AdminDashboard: React.FC = () => {
                     Système de Paiement Sécurisé (Côté Serveur)
                   </h2>
                   <p className="text-xs text-zinc-400 mt-1">
-                    Par sécurité, les clés secrètes FedaPay / KKiaPay / CinetPay ne sont jamais stockées dans le navigateur. Elles se configurent dans les variables d’environnement du serveur (Secrets AI Studio / `.env`).
+                    Par sécurité, les clés secrètes FedaPay / KKiaPay / CinetPay ne sont jamais stockées dans le navigateur. Elles se configurent dans les variables d’environnement du serveur.
                   </p>
                 </div>
                 <button
@@ -1015,7 +1433,7 @@ export const AdminDashboard: React.FC = () => {
                 </p>
                 <ol className="list-decimal pl-5 space-y-1 text-zinc-400">
                   <li>Ouvrez votre compte marchand sur <strong>fedapay.com</strong> (ou <strong>kkiapay.me</strong> / <strong>cinetpay.com</strong>).</li>
-                  <li>Ajoutez vos clés dans le panneau <strong>Secrets / Variables d’environnement</strong> : <code className="text-zinc-200">PAYMENT_PROVIDER=fedapay</code>, <code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, et <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code>.</li>
+                  <li>Ajoutez vos clés dans les variables d’environnement du serveur : <code className="text-zinc-200">PAYMENT_PROVIDER=fedapay</code>, <code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, et <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code>.</li>
                   <li>Configurez l’URL Webhook sur votre compte prestataire vers : <code className="text-zinc-200">{window.location.origin}/api/payments/webhook</code>.</li>
                 </ol>
               </div>
@@ -1235,93 +1653,400 @@ export const AdminDashboard: React.FC = () => {
                 </span>
 
                 <div className="space-y-3">
-                  {editingCourse.modules.map((mod) => {
-                    const draft = lessonDraftByMod[mod.id] || {
-                      title: '',
-                      duration: '',
-                      videoUrl: '',
-                      summary: ''
-                    };
+                  {editingCourse.modules.map((mod, modIndex) => {
+                    const draft = lessonDraftByMod[mod.id] || { ...emptyDraft };
                     return (
-                      <div key={mod.id} className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <strong className="text-slate-200">{mod.title}</strong>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setEditingCourse({
-                                ...editingCourse,
-                                modules: editingCourse.modules.filter((m) => m.id !== mod.id)
-                              })
-                            }
-                            className="text-red-400 text-[11px] cursor-pointer"
-                          >
-                            Supprimer module
-                          </button>
+                      <div key={mod.id} className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-slate-200">
+                            Module {mod.order} : {mod.title}
+                          </strong>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveModule(modIndex, -1)}
+                              disabled={modIndex === 0}
+                              className="p-1 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                              title="Monter le module"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleMoveModule(modIndex, 1)}
+                              disabled={modIndex === editingCourse.modules.length - 1}
+                              className="p-1 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                              title="Descendre le module"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingCourse({
+                                  ...editingCourse,
+                                  modules: editingCourse.modules
+                                    .filter((m) => m.id !== mod.id)
+                                    .map((m, idx) => ({ ...m, order: idx + 1 }))
+                                })
+                              }
+                              className="text-red-400 text-[11px] cursor-pointer ml-1"
+                            >
+                              Supprimer
+                            </button>
+                          </div>
                         </div>
 
-                        <div className="space-y-1 pl-2">
-                          {mod.lessons.map((les) => (
-                            <div key={les.id} className="flex items-center justify-between text-[11px] text-zinc-400">
-                              <span>· {les.title} ({les.duration})</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setEditingCourse({
-                                    ...editingCourse,
-                                    modules: editingCourse.modules.map((m) =>
-                                      m.id === mod.id
-                                        ? { ...m, lessons: m.lessons.filter((l) => l.id !== les.id) }
-                                        : m
-                                    )
-                                  })
-                                }
-                                className="text-red-400 cursor-pointer"
-                              >
-                                Retirer
-                              </button>
+                        <div className="space-y-1.5 pl-2">
+                          {mod.lessons.map((les, lesIndex) => (
+                            <div key={les.id} className="p-2 rounded bg-zinc-900/60 border border-zinc-800/70 space-y-2">
+                              <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-300">
+                                <span className="truncate">
+                                  · {les.title} ({les.duration})
+                                  {les.videoUrl ? ' · Vidéo liée' : ''}
+                                  {les.downloads && les.downloads.length > 0 ? ` · ${les.downloads.length} PDF` : ''}
+                                  {les.exercise ? ' · Exercice' : ''}
+                                </span>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMoveLesson(mod.id, lesIndex, -1)}
+                                    disabled={lesIndex === 0}
+                                    className="p-0.5 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                                    title="Monter"
+                                  >
+                                    <ArrowUp className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMoveLesson(mod.id, lesIndex, 1)}
+                                    disabled={lesIndex === mod.lessons.length - 1}
+                                    className="p-0.5 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                                    title="Descendre"
+                                  >
+                                    <ArrowDown className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingLessonId(editingLessonId === les.id ? null : les.id)
+                                    }
+                                    className="text-[#D4AF37] hover:underline cursor-pointer px-1"
+                                  >
+                                    {editingLessonId === les.id ? 'Fermer' : 'Éditer'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingCourse({
+                                        ...editingCourse,
+                                        modules: editingCourse.modules.map((m) =>
+                                          m.id === mod.id
+                                            ? { ...m, lessons: m.lessons.filter((l) => l.id !== les.id) }
+                                            : m
+                                        )
+                                      })
+                                    }
+                                    className="text-red-400 cursor-pointer"
+                                  >
+                                    Retirer
+                                  </button>
+                                </div>
+                              </div>
+
+                              {editingLessonId === les.id && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-zinc-800 text-[11px]">
+                                  <input
+                                    type="text"
+                                    value={les.title}
+                                    onChange={(e) =>
+                                      setEditingCourse({
+                                        ...editingCourse,
+                                        modules: editingCourse.modules.map((m) =>
+                                          m.id === mod.id
+                                            ? {
+                                                ...m,
+                                                lessons: m.lessons.map((l) =>
+                                                  l.id === les.id ? { ...l, title: e.target.value } : l
+                                                )
+                                              }
+                                            : m
+                                        )
+                                      })
+                                    }
+                                    placeholder="Titre leçon"
+                                    className="px-2 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-slate-100"
+                                  />
+                                  <input
+                                    type="text"
+                                    value={les.duration}
+                                    onChange={(e) =>
+                                      setEditingCourse({
+                                        ...editingCourse,
+                                        modules: editingCourse.modules.map((m) =>
+                                          m.id === mod.id
+                                            ? {
+                                                ...m,
+                                                lessons: m.lessons.map((l) =>
+                                                  l.id === les.id ? { ...l, duration: e.target.value } : l
+                                                )
+                                              }
+                                            : m
+                                        )
+                                      })
+                                    }
+                                    placeholder="Durée (ex: 25 min)"
+                                    className="px-2 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-slate-100"
+                                  />
+                                  <div className="sm:col-span-2 flex gap-2 items-center">
+                                    <input
+                                      type="text"
+                                      value={les.videoUrl || ''}
+                                      onChange={(e) =>
+                                        setEditingCourse({
+                                          ...editingCourse,
+                                          modules: editingCourse.modules.map((m) =>
+                                            m.id === mod.id
+                                              ? {
+                                                  ...m,
+                                                  lessons: m.lessons.map((l) =>
+                                                    l.id === les.id ? { ...l, videoUrl: e.target.value || undefined } : l
+                                                  )
+                                                }
+                                              : m
+                                          )
+                                        })
+                                      }
+                                      placeholder="URL Vidéo (MP4, Bunny Stream, Vimeo, ou sb://course-videos/...)"
+                                      className="flex-1 px-2 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-slate-100"
+                                    />
+                                    <label className="px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-zinc-200 font-semibold cursor-pointer shrink-0 flex items-center gap-1">
+                                      <UploadCloud className="w-3 h-3" />
+                                      <span>Vidéo</span>
+                                      <input
+                                        type="file"
+                                        accept="video/mp4,video/webm,video/quicktime"
+                                        className="hidden"
+                                        onChange={async (e) => {
+                                          const f = e.target.files?.[0];
+                                          if (!f) return;
+                                          const ref = await uploadMediaToCloud('course-videos', f, editingCourse.id);
+                                          if (ref) {
+                                            setEditingCourse({
+                                              ...editingCourse,
+                                              modules: editingCourse.modules.map((m) =>
+                                                m.id === mod.id
+                                                  ? {
+                                                      ...m,
+                                                      lessons: m.lessons.map((l) =>
+                                                        l.id === les.id ? { ...l, videoUrl: ref } : l
+                                                      )
+                                                    }
+                                                  : m
+                                              )
+                                            });
+                                          }
+                                        }}
+                                      />
+                                    </label>
+                                  </div>
+                                  <div className="sm:col-span-2 flex gap-2 items-center">
+                                    <input
+                                      type="text"
+                                      value={les.downloads?.[0]?.url || ''}
+                                      onChange={(e) => {
+                                        const urlVal = e.target.value;
+                                        setEditingCourse({
+                                          ...editingCourse,
+                                          modules: editingCourse.modules.map((m) =>
+                                            m.id === mod.id
+                                              ? {
+                                                  ...m,
+                                                  lessons: m.lessons.map((l) =>
+                                                    l.id === les.id
+                                                      ? {
+                                                          ...l,
+                                                          downloads: urlVal
+                                                            ? [
+                                                                {
+                                                                  name: l.downloads?.[0]?.name || `Support - ${l.title}`,
+                                                                  type: 'PDF',
+                                                                  size: 'PDF',
+                                                                  description: 'Support de cours PDF',
+                                                                  url: urlVal
+                                                                }
+                                                              ]
+                                                            : l.downloads
+                                                        }
+                                                      : l
+                                                  )
+                                                }
+                                              : m
+                                          )
+                                        });
+                                      }}
+                                      placeholder="URL PDF téléchargeable ou sb://course-pdfs/..."
+                                      className="flex-1 px-2 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-slate-100"
+                                    />
+                                    <label className="px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-zinc-200 font-semibold cursor-pointer shrink-0 flex items-center gap-1">
+                                      <UploadCloud className="w-3 h-3" />
+                                      <span>PDF</span>
+                                      <input
+                                        type="file"
+                                        accept="application/pdf"
+                                        className="hidden"
+                                        onChange={async (e) => {
+                                          const f = e.target.files?.[0];
+                                          if (!f) return;
+                                          const ref = await uploadMediaToCloud('course-pdfs', f, editingCourse.id);
+                                          if (ref) {
+                                            setEditingCourse({
+                                              ...editingCourse,
+                                              modules: editingCourse.modules.map((m) =>
+                                                m.id === mod.id
+                                                  ? {
+                                                      ...m,
+                                                      lessons: m.lessons.map((l) =>
+                                                        l.id === les.id
+                                                          ? {
+                                                              ...l,
+                                                              downloads: [
+                                                                {
+                                                                  name: l.downloads?.[0]?.name || f.name,
+                                                                  type: 'PDF',
+                                                                  size: `${Math.max(1, Math.round(f.size / 1024))} Ko`,
+                                                                  description: 'Support de cours PDF',
+                                                                  url: ref
+                                                                }
+                                                              ]
+                                                            }
+                                                          : l
+                                                      )
+                                                    }
+                                                  : m
+                                              )
+                                            });
+                                          }
+                                        }}
+                                      />
+                                    </label>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
 
                         {/* Quick Add Lesson */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-zinc-900">
-                          <input
-                            type="text"
-                            value={draft.title}
-                            onChange={(e) =>
-                              setLessonDraftByMod((prev) => ({
-                                ...prev,
-                                [mod.id]: { ...draft, title: e.target.value }
-                              }))
-                            }
-                            placeholder="Titre nouvelle leçon"
-                            className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
-                          />
-                          <input
-                            type="text"
-                            value={draft.videoUrl}
-                            onChange={(e) =>
-                              setLessonDraftByMod((prev) => ({
-                                ...prev,
-                                [mod.id]: { ...draft, videoUrl: e.target.value }
-                              }))
-                            }
-                            placeholder="URL Vidéo MP4 (optionnel)"
-                            className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleAddLessonToModule(mod.id)}
-                            className="px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-slate-200 font-semibold text-[11px] cursor-pointer"
-                          >
-                            + Ajouter leçon
-                          </button>
+                        <div className="space-y-2 pt-2 border-t border-zinc-900">
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <input
+                              type="text"
+                              value={draft.title}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, title: e.target.value }
+                                }))
+                              }
+                              placeholder="Titre nouvelle leçon *"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                            <input
+                              type="text"
+                              value={draft.duration}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, duration: e.target.value }
+                                }))
+                              }
+                              placeholder="Durée (ex: 25 min)"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                            <input
+                              type="text"
+                              value={draft.videoUrl}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, videoUrl: e.target.value }
+                                }))
+                              }
+                              placeholder="URL Vidéo MP4 (optionnel)"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <input
+                              type="text"
+                              value={draft.pdfName}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, pdfName: e.target.value }
+                                }))
+                              }
+                              placeholder="Nom PDF (optionnel)"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                            <input
+                              type="text"
+                              value={draft.pdfUrl}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, pdfUrl: e.target.value }
+                                }))
+                              }
+                              placeholder="Lien PDF (optionnel)"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                            <input
+                              type="text"
+                              value={draft.exTitle}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, exTitle: e.target.value }
+                                }))
+                              }
+                              placeholder="Exercice pratique (optionnel)"
+                              className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                          </div>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <input
+                              type="text"
+                              value={draft.summary}
+                              onChange={(e) =>
+                                setLessonDraftByMod((prev) => ({
+                                  ...prev,
+                                  [mod.id]: { ...draft, summary: e.target.value }
+                                }))
+                              }
+                              placeholder="Notes / Résumé de la leçon"
+                              className="flex-1 px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100 text-[11px]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleAddLessonToModule(mod.id)}
+                              className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-slate-200 font-semibold text-[11px] cursor-pointer shrink-0"
+                            >
+                              + Ajouter la leçon
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
                   })}
                 </div>
+
+                {uploadStatus && (
+                  <p className="text-[11px] text-[#F3E5AB] bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2">
+                    {uploadStatus}
+                  </p>
+                )}
 
                 {/* Add Module */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-zinc-800">

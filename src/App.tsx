@@ -23,7 +23,7 @@ import { CheckoutModal } from './components/CheckoutModal';
 import { CertificateModal } from './components/CertificateModal';
 import { AuthModal } from './components/AuthModal';
 import { Course } from './types';
-import { ArrowRight, Sparkles, CheckCircle, MessageSquareQuote } from 'lucide-react';
+import { ArrowRight, Sparkles, CheckCircle, MessageSquareQuote, X, Info } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -32,7 +32,9 @@ const MainAppContent: React.FC = () => {
     activeLessonId,
     navigateTo,
     courses,
-    testimonials
+    testimonials,
+    paymentReturnNotice,
+    dismissPaymentReturnNotice
   } = useApp();
 
   const [checkoutCourse, setCheckoutCourse] = useState<Course | null>(null);
@@ -63,6 +65,47 @@ const MainAppContent: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#08080A] text-slate-100 flex flex-col font-sans selection:bg-[#D4AF37]/30 selection:text-[#F3E5AB]">
       <Navbar />
+
+      {paymentReturnNotice && (
+        <div
+          className={`px-4 py-3 border-b text-xs flex items-center justify-between gap-4 ${
+            paymentReturnNotice.type === 'success'
+              ? 'bg-emerald-950/90 border-emerald-700 text-emerald-200'
+              : 'bg-amber-950/80 border-[#D4AF37]/40 text-[#F3E5AB]'
+          }`}
+        >
+          <div className="max-w-7xl mx-auto w-full flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2.5">
+              {paymentReturnNotice.type === 'success' ? (
+                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <Info className="w-4 h-4 text-[#D4AF37] shrink-0" />
+              )}
+              <span>{paymentReturnNotice.message}</span>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {paymentReturnNotice.type === 'success' && (
+                <button
+                  onClick={() => {
+                    dismissPaymentReturnNotice();
+                    navigateTo('student-space');
+                  }}
+                  className="px-3 py-1 rounded bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer"
+                >
+                  Mes Formations
+                </button>
+              )}
+              <button
+                onClick={dismissPaymentReturnNotice}
+                className="p-1 text-zinc-300 hover:text-white cursor-pointer"
+                aria-label="Fermer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1">
         {activeView === 'home' && (

@@ -95,8 +95,8 @@ export const ContactSection: React.FC = () => {
                   </div>
                   <div>
                     <strong className="text-slate-200 block">Horaires de Permanence</strong>
-                    <span>Lundi – Vendredi : 08h30 – 19h00 (GMT+1)</span>
-                    <span>Samedi : 09h00 – 14h00</span>
+                    <span className="block">Lundi – Vendredi : 08h30 – 19h00 (GMT+1)</span>
+                    <span className="block">Samedi : 09h00 – 14h00</span>
                   </div>
                 </div>
               </div>

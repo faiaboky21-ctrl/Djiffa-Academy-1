@@ -1,10 +1,12 @@
 /**
  * DJIFFA ACADEMY - Student Personal Space & Dashboard
- * Complete workspace: Courses, Resume, Resources, Exercises & Evaluations, Progress, Certificates, Purchases, Coaching, Profile
+ * Complete workspace: Courses, Resume, Resources (with signed cloud URLs), Exercises, Progress, Certificates, Purchases, Coaching, Profile
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { isSupabaseStorageRef, fetchProtectedSignedMediaUrl } from '../lib/media';
+import { getSupabaseAccessToken } from '../lib/supabase';
 import {
   BookOpen,
   Award,
@@ -16,7 +18,8 @@ import {
   HelpCircle,
   Play,
   Bell,
-  Save
+  Save,
+  Cloud
 } from 'lucide-react';
 
 interface StudentDashboardProps {
@@ -26,6 +29,8 @@ interface StudentDashboardProps {
 export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertificateModal }) => {
   const {
     currentUser,
+    adminToken,
+    supabaseReady,
     courses,
     orders,
     coachingRequests,
@@ -34,6 +39,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     navigateTo,
     getCourseProgress,
     updateUserProfile,
+    syncCurrentStudentToCloud,
     openAuthModal
   } = useApp();
 
@@ -45,6 +51,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
   const [profilePhone, setProfilePhone] = useState(currentUser?.phone || '');
   const [profileCountry, setProfileCountry] = useState(currentUser?.country || 'Bénin');
   const [profileSaved, setProfileSaved] = useState(false);
+  const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null);
+  const [resourceStatus, setResourceStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (currentUser) {
+      setProfileName(currentUser.name || '');
+      setProfilePhone(currentUser.phone || '');
+      setProfileCountry(currentUser.country || 'Bénin');
+    }
+  }, [currentUser?.id, currentUser?.name, currentUser?.phone, currentUser?.country]);
 
   if (!currentUser) {
     return (
@@ -79,11 +95,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
   const userCoaching = coachingRequests.filter((r) => r.userEmail === currentUser.email || r.userId === currentUser.id);
   const userNotifications = notifications.filter((n) => n.userId === 'all' || n.userId === currentUser.id);
 
-  // Aggregate downloadable resources from all enrolled courses
+  // Aggregate downloadable resources from all enrolled courses (keeping courseId for private signed URL resolution)
   const enrolledDownloads = enrolledCourses.flatMap((c) =>
     c.modules.flatMap((m) =>
       m.lessons.flatMap((l) =>
-        (l.downloads || []).map((d) => ({ ...d, courseTitle: c.title, lessonTitle: l.title }))
+        (l.downloads || []).map((d) => ({ ...d, courseId: c.id, courseTitle: c.title, lessonTitle: l.title }))
       )
     )
   );
@@ -95,10 +111,74 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     setTimeout(() => setProfileSaved(false), 3000);
   };
 
+  const handleCloudSync = async () => {
+    setCloudSyncMsg('Synchronisation en cours...');
+    const res = await syncCurrentStudentToCloud();
+    setCloudSyncMsg(res.message);
+    setTimeout(() => setCloudSyncMsg(null), 4500);
+  };
+
+  const handleResourceDownload = async (res: {
+    name: string;
+    url?: string;
+    courseId: string;
+    courseTitle: string;
+    lessonTitle: string;
+  }) => {
+    const sbRef = isSupabaseStorageRef(res.url);
+    if (sbRef) {
+      setResourceStatus(`Préparation du téléchargement sécurisé pour « ${res.name} »...`);
+      try {
+        const supabaseToken = await getSupabaseAccessToken();
+        const result = await fetchProtectedSignedMediaUrl({
+          bucket: sbRef.bucket,
+          path: sbRef.path,
+          courseId: res.courseId,
+          supabaseToken,
+          adminToken
+        });
+        if (result.ok && result.signedUrl) {
+          const a = document.createElement('a');
+          a.href = result.signedUrl;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.click();
+          setResourceStatus(`Ouverture sécurisée de « ${res.name} ».`);
+        } else {
+          setResourceStatus(result.error || 'Ressource privée inaccessible.');
+        }
+      } catch {
+        setResourceStatus('Erreur lors de la récupération du document cloud.');
+      }
+      setTimeout(() => setResourceStatus(null), 4000);
+      return;
+    }
+
+    if (res.url) {
+      const a = document.createElement('a');
+      a.href = res.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.click();
+      return;
+    }
+
+    const blob = new Blob(
+      [`DJIFFA ACADEMY - ${res.name}\nCours: ${res.courseTitle}\nLeçon: ${res.lessonTitle}`],
+      { type: 'text/plain;charset=utf-8' }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${res.name}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="py-10 sm:py-16 bg-[#08080A]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-10">
-        
+
         {/* Welcome Header */}
         <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xl">
           <div className="flex items-center gap-4">
@@ -118,7 +198,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={() => navigateTo('catalog')}
               className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 border border-zinc-700 transition-colors cursor-pointer"
@@ -325,6 +405,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
         {activeTab === 'resources' && (
           <div className="space-y-6">
             <h2 className="font-brand text-xl font-bold text-slate-100">Mes Ressources Téléchargeables</h2>
+            {resourceStatus && (
+              <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-700 text-xs text-emerald-200">
+                {resourceStatus}
+              </div>
+            )}
             {enrolledDownloads.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {enrolledDownloads.map((res, idx) => (
@@ -342,16 +427,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                       </span>
                     </div>
                     <button
-                      onClick={() => {
-                        const blob = new Blob(
-                          [`DJIFFA ACADEMY - ${res.name}\nCours: ${res.courseTitle}\nLeçon: ${res.lessonTitle}`],
-                          { type: 'text/plain;charset=utf-8' }
-                        );
-                        const a = document.createElement('a');
-                        a.href = URL.createObjectURL(blob);
-                        a.download = `${res.name}.txt`;
-                        a.click();
-                      }}
+                      onClick={() => handleResourceDownload(res)}
                       className="px-3 py-2 rounded-lg bg-zinc-900 hover:bg-[#D4AF37] hover:text-zinc-950 border border-zinc-700 text-xs font-semibold text-zinc-200 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
@@ -396,33 +472,86 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
             </div>
 
             <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4">
-              <h3 className="font-brand text-lg font-bold text-slate-100">Historique de mes Devoirs & Quiz</h3>
+              <h3 className="font-brand text-lg font-bold text-slate-100">Historique de mes Devoirs</h3>
               {Object.keys(currentUser.submittedExercises).length > 0 ? (
                 <div className="space-y-3">
-                  {Object.entries(currentUser.submittedExercises).map(([lessonId, sub]) => (
-                    <div key={lessonId} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-2 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-[#F3E5AB]">Leçon : {lessonId}</span>
-                        <span className="text-zinc-500 font-mono text-[10px]">
-                          {new Date(sub.submittedAt).toLocaleDateString('fr-FR')}
-                        </span>
+                  {Object.entries(currentUser.submittedExercises).map(([lessonId, sub]) => {
+                    const matchedCourse = courses.find((c) =>
+                      c.modules.some((m) => m.lessons.some((l) => l.id === lessonId))
+                    );
+                    const matchedLesson = matchedCourse?.modules
+                      .flatMap((m) => m.lessons)
+                      .find((l) => l.id === lessonId);
+                    return (
+                      <div key={lessonId} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <span className="font-semibold text-[#F3E5AB] block">
+                              {matchedLesson ? matchedLesson.title : `Leçon ${lessonId}`}
+                            </span>
+                            {matchedCourse && (
+                              <span className="text-[10px] text-zinc-500">{matchedCourse.title}</span>
+                            )}
+                          </div>
+                          <span className="text-zinc-500 font-mono text-[10px] shrink-0">
+                            {new Date(sub.submittedAt).toLocaleDateString('fr-FR')}
+                          </span>
+                        </div>
+                        <p className="text-zinc-300 italic bg-zinc-950 p-2.5 rounded border border-zinc-800/80">
+                          « {sub.submissionText} »
+                        </p>
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-emerald-400">Statut : Enregistré</span>
+                          {sub.link && (
+                            <a href={sub.link} target="_blank" rel="noreferrer" className="text-[#D4AF37] hover:underline">
+                              Voir le lien fourni →
+                            </a>
+                          )}
+                        </div>
                       </div>
-                      <p className="text-zinc-300 italic bg-zinc-950 p-2.5 rounded border border-zinc-800/80">
-                        « {sub.submissionText} »
-                      </p>
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-emerald-400">Statut : Enregistré</span>
-                        {sub.link && (
-                          <a href={sub.link} target="_blank" rel="noreferrer" className="text-[#D4AF37] hover:underline">
-                            Voir le lien fourni →
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-xs text-zinc-500">Aucun devoir soumis pour le moment.</p>
+              )}
+            </div>
+
+            <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <h3 className="font-brand text-lg font-bold text-slate-100">Résultats de mes Quiz & Évaluations</h3>
+              {Object.keys(currentUser.quizScores).length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {Object.entries(currentUser.quizScores).map(([lessonId, qRes]) => {
+                    const matchedCourse = courses.find((c) =>
+                      c.modules.some((m) => m.lessons.some((l) => l.id === lessonId))
+                    );
+                    const matchedLesson = matchedCourse?.modules
+                      .flatMap((m) => m.lessons)
+                      .find((l) => l.id === lessonId);
+                    return (
+                      <div key={lessonId} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between gap-3 text-xs">
+                        <div>
+                          <span className="font-semibold text-slate-100 block">
+                            {matchedLesson ? matchedLesson.title : `Évaluation ${lessonId}`}
+                          </span>
+                          <span className="text-[11px] text-zinc-400">
+                            {new Date(qRes.completedAt).toLocaleDateString('fr-FR')}
+                          </span>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span className="font-mono font-bold text-[#D4AF37] block">
+                            {qRes.score} / {qRes.total}
+                          </span>
+                          <span className={`text-[10px] font-semibold ${qRes.passed ? 'text-emerald-400' : 'text-amber-400'}`}>
+                            {qRes.passed ? 'Validé' : 'À revoir'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">Aucun quiz réalisé pour le moment.</p>
               )}
             </div>
           </div>
@@ -519,7 +648,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                             {ord.paymentMethod.toUpperCase()} ({ord.paymentProvider})
                           </td>
                           <td className="p-4 font-mono text-[#D4AF37] tabular-nums font-bold">
-                            {ord.amount} {ord.currency}
+                            {ord.amount.toLocaleString('fr-FR')} {ord.currency}
                           </td>
                           <td className="p-4">
                             <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800 uppercase">
@@ -600,7 +729,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
           </div>
         )}
 
-        {/* Tab 7: Personal Profile */}
+        {/* Tab 7: Personal Profile & Cloud Sync */}
         {activeTab === 'profile' && (
           <div className="max-w-xl p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-5">
             <h2 className="font-brand text-xl font-bold text-slate-100">Mes Informations Personnelles</h2>
@@ -648,13 +777,31 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
               {profileSaved && (
                 <p className="text-xs text-emerald-400 font-medium">✓ Informations mises à jour.</p>
               )}
-              <button
-                type="submit"
-                className="px-5 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer"
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>Enregistrer mes modifications</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Enregistrer mes modifications</span>
+                </button>
+
+                {supabaseReady && (
+                  <button
+                    type="button"
+                    onClick={handleCloudSync}
+                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                  >
+                    <Cloud className="w-3.5 h-3.5 text-[#D4AF37]" />
+                    <span>Synchroniser ma progression cloud</span>
+                  </button>
+                )}
+              </div>
+              {cloudSyncMsg && (
+                <p className="text-xs text-[#F3E5AB] bg-zinc-900 p-2.5 rounded-lg border border-zinc-800">
+                  {cloudSyncMsg}
+                </p>
+              )}
             </form>
           </div>
         )}

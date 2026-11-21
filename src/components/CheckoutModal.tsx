@@ -1,11 +1,11 @@
 /**
  * DJIFFA ACADEMY - Secure Checkout & Payment System
- * Follows mandatory purchase journey:
- * Account check/creation -> Payment method choice -> Server-side session / clear "Non configuré" notice -> Unlock on confirmation
+ * Supports real FedaPay / KKiaPay / CinetPay server sessions + verification
+ * Falls back cleanly to clearly marked TEST/DEMO mode when gateway keys are not yet configured
  */
 
-import React, { useState } from 'react';
-import { Course, PaymentMethod } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Course, PaymentMethod, Order } from '../types';
 import { useApp } from '../context/AppContext';
 import {
   X,
@@ -21,7 +21,8 @@ import {
   Loader2,
   UserPlus,
   LogIn,
-  ExternalLink
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -36,11 +37,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
     formatPrice,
     currency,
     processPurchase,
+    verifyExistingPayment,
     paymentConfig,
+    supabaseReady,
     navigateTo,
     validatePromoCode,
-    registerUser,
-    loginStudent
+    signUpWithEmailPassword,
+    signInWithEmailPassword
   } = useApp();
 
   const [step, setStep] = useState<'account' | 'details' | 'processing' | 'confirmed' | 'failed'>(
@@ -51,38 +54,72 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
   // Account creation/login fields
   const [authName, setAuthName] = useState('');
   const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [authPhone, setAuthPhone] = useState('');
   const [authCountry, setAuthCountry] = useState('Bénin');
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Payment details
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('mtn_momo');
   const [phoneNumber, setPhoneNumber] = useState(currentUser?.phone || '');
   const [promoInput, setPromoInput] = useState('');
   const [appliedPromo, setAppliedPromo] = useState<{ code: string; percent: number } | null>(null);
-  const [confirmedOrder, setConfirmedOrder] = useState<any>(null);
+  const [confirmedOrder, setConfirmedOrder] = useState<Order | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
+
+  // Active external payment session state (FedaPay / CinetPay / KKiaPay)
   const [externalPaymentUrl, setExternalPaymentUrl] = useState<string | null>(null);
+  const [pendingRef, setPendingRef] = useState<string | null>(null);
+  const [pendingTxId, setPendingTxId] = useState<string>('');
+  const [verifyingExternal, setVerifyingExternal] = useState(false);
 
   const discountRatio = appliedPromo ? appliedPromo.percent / 100 : 0;
 
-  const handleAccountSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (currentUser?.phone && !phoneNumber) {
+      setPhoneNumber(currentUser.phone);
+    }
+  }, [currentUser?.id, currentUser?.phone, phoneNumber]);
+
+  const handleAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
-    if (accountMode === 'login') {
-      const res = loginStudent(authEmail);
-      if (!res.ok) {
-        setErrorMessage(res.message || 'Compte introuvable.');
-        return;
+    setInfoMessage('');
+    setAuthLoading(true);
+    try {
+      if (accountMode === 'login') {
+        const res = await signInWithEmailPassword(authEmail, authPassword);
+        if (!res.ok) {
+          setErrorMessage(res.message || 'Compte introuvable ou mot de passe incorrect.');
+          return;
+        }
+        setStep('details');
+      } else {
+        if (!authName.trim() || !authEmail.trim()) {
+          setErrorMessage('Veuillez renseigner votre nom complet et votre adresse email.');
+          return;
+        }
+        if (supabaseReady && authPassword.length < 6) {
+          setErrorMessage('Veuillez choisir un mot de passe d’au moins 6 caractères.');
+          return;
+        }
+        const res = await signUpWithEmailPassword(authName, authEmail, authPassword, authPhone, authCountry);
+        if (!res.ok) {
+          setErrorMessage(res.message || 'Création de compte impossible.');
+          return;
+        }
+        if (res.needsConfirmation) {
+          setInfoMessage(res.message || 'Vérifiez votre email pour confirmer votre compte avant de poursuivre.');
+          return;
+        }
+        if (authPhone) setPhoneNumber(authPhone);
+        setStep('details');
       }
-      setStep('details');
-    } else {
-      if (!authName.trim() || !authEmail.trim()) {
-        setErrorMessage('Veuillez renseigner votre nom complet et votre adresse email.');
-        return;
-      }
-      const user = registerUser(authName, authEmail, authPhone, authCountry);
-      if (user.phone) setPhoneNumber(user.phone);
-      setStep('details');
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Erreur d’authentification.');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -94,6 +131,55 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
     } else {
       setAppliedPromo(null);
       setErrorMessage('Code promotionnel invalide ou expiré.');
+    }
+  };
+
+  const handleVerifyExternalPayment = async () => {
+    if (!pendingRef) return;
+    setErrorMessage('');
+    setVerifyingExternal(true);
+    try {
+      const verify = await verifyExistingPayment(pendingRef, pendingTxId || undefined, course.id);
+      if (verify.verified && currentUser) {
+        const baseAmount =
+          currency === 'EUR' ? course.priceEUR : currency === 'USD' ? course.priceUSD : course.priceXOF;
+        const finalAmount = Math.max(0, Math.round(baseAmount * (1 - discountRatio)));
+        setConfirmedOrder({
+          id: `ord-${Date.now()}`,
+          reference: pendingRef,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userEmail: currentUser.email,
+          courseId: course.id,
+          courseTitle: course.title,
+          amount: finalAmount,
+          currency,
+          paymentMethod: selectedMethod,
+          paymentProvider:
+            paymentConfig.activeProvider === 'kkiapay'
+              ? 'KKiaPay'
+              : paymentConfig.activeProvider === 'cinetpay'
+              ? 'CinetPay'
+              : 'FedaPay',
+          providerTransactionId: pendingTxId || undefined,
+          status: 'confirmed',
+          isDemoTransaction: paymentConfig.isTestMode,
+          promoCodeUsed: appliedPromo?.code,
+          customerPhone: phoneNumber || currentUser.phone,
+          createdAt: new Date().toISOString(),
+          confirmedAt: new Date().toISOString()
+        });
+        setStep('confirmed');
+        try {
+          confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
+        } catch {
+          // ignore confetti error
+        }
+      } else {
+        setErrorMessage(verify.message || 'Le paiement n’est pas encore confirmé par le prestataire.');
+      }
+    } finally {
+      setVerifyingExternal(false);
     }
   };
 
@@ -118,7 +204,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         currency === 'EUR' ? course.priceEUR : currency === 'USD' ? course.priceUSD : course.priceXOF;
       const finalAmount = Math.max(0, Math.round(baseAmount * (1 - discountRatio)));
 
-      // If real server payment is configured and not explicitly testing demo
+      // Real server payment session initialization
       if (paymentConfig.serverConfigured && !forceDemoTest) {
         const ref = `DJF-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
         const sessionRes = await fetch('/api/payments/create-session', {
@@ -129,18 +215,32 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             amount: finalAmount,
             currency,
             description: course.title,
+            courseId: course.id,
+            userId: currentUser.id,
             customerEmail: currentUser.email,
             customerName: currentUser.name,
             customerPhone: phoneNumber || currentUser.phone,
-            paymentMethod: selectedMethod
+            paymentMethod: selectedMethod,
+            promoCode: appliedPromo?.code
           })
         });
         const sessionData = await sessionRes.json();
+
         if (sessionData.ok && sessionData.paymentUrl) {
+          setPendingRef(ref);
+          if (sessionData.transactionId) setPendingTxId(String(sessionData.transactionId));
           setExternalPaymentUrl(sessionData.paymentUrl);
           setStep('details');
           return;
         }
+
+        if (sessionData.ok && sessionData.provider === 'kkiapay') {
+          setPendingRef(ref);
+          setExternalPaymentUrl(`https://widget.kkiapay.me/?amount=${finalAmount}&key=${encodeURIComponent(sessionData.publicKey || '')}&sandbox=${sessionData.sandbox ? 'true' : 'false'}&callback=${encodeURIComponent(sessionData.callbackUrl || window.location.origin)}`);
+          setStep('details');
+          return;
+        }
+
         if (!sessionData.ok) {
           setStep('failed');
           setErrorMessage(sessionData.error || sessionData.message || 'Impossible d’initialiser le paiement.');
@@ -148,8 +248,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         }
       }
 
-      // Demo / Sandbox test flow clearly identified as TEST
-      await new Promise((res) => setTimeout(res, 1100));
+      // Demo / Sandbox test flow clearly identified as TEST when gateway isn't configured
+      await new Promise((res) => setTimeout(res, 900));
       const contactRef = selectedMethod.startsWith('card') ? 'Passerelle Carte Sécurisée' : phoneNumber;
 
       const result = await processPurchase(course.id, selectedMethod, contactRef, {
@@ -179,7 +279,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
       <div className="relative w-full max-w-xl rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl overflow-hidden my-8">
-        
+
         {/* Top Header */}
         <div className="p-5 border-b border-zinc-800/80 flex items-center justify-between bg-zinc-900/50">
           <div className="flex items-center gap-2">
@@ -247,7 +347,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-900 rounded-xl border border-zinc-800">
               <button
                 type="button"
-                onClick={() => { setAccountMode('register'); setErrorMessage(''); }}
+                onClick={() => { setAccountMode('register'); setErrorMessage(''); setInfoMessage(''); }}
                 className={`py-2 text-xs font-semibold rounded-lg cursor-pointer ${
                   accountMode === 'register' ? 'bg-[#D4AF37] text-zinc-950 font-bold' : 'text-zinc-400'
                 }`}
@@ -256,7 +356,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               </button>
               <button
                 type="button"
-                onClick={() => { setAccountMode('login'); setErrorMessage(''); }}
+                onClick={() => { setAccountMode('login'); setErrorMessage(''); setInfoMessage(''); }}
                 className={`py-2 text-xs font-semibold rounded-lg cursor-pointer ${
                   accountMode === 'login' ? 'bg-[#D4AF37] text-zinc-950 font-bold' : 'text-zinc-400'
                 }`}
@@ -269,6 +369,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               <div className="p-3 rounded-lg bg-red-950/50 border border-red-800 text-xs text-red-300 flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {infoMessage && (
+              <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-700 text-xs text-emerald-200 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{infoMessage}</span>
               </div>
             )}
 
@@ -299,6 +406,23 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                 />
               </div>
 
+              {supabaseReady && (
+                <div>
+                  <label className="text-zinc-400 block mb-1">
+                    Mot de passe {accountMode === 'register' ? '* (6 caractères min.)' : '*'}
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={accountMode === 'register' ? 6 : undefined}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                  />
+                </div>
+              )}
+
               {accountMode === 'register' && (
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -326,10 +450,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
 
               <button
                 type="submit"
-                className="w-full py-3.5 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
+                disabled={authLoading}
+                className="w-full py-3.5 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {accountMode === 'register' ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-                <span>Continuer vers le paiement sécurisé</span>
+                <span>{authLoading ? 'Traitement...' : 'Continuer vers le paiement sécurisé'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
@@ -339,22 +464,47 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         {/* STEP 2: Payment Method & Confirmation */}
         {step === 'details' && currentUser && (
           <form onSubmit={(e) => handleExecutePayment(e, !paymentConfig.serverConfigured)} className="p-6 space-y-5">
-            
-            {/* External hosted checkout link if server returned one */}
-            {externalPaymentUrl && (
+
+            {/* External hosted checkout link & live verification panel */}
+            {externalPaymentUrl && pendingRef && (
               <div className="p-4 rounded-xl bg-emerald-950/50 border border-emerald-600/60 space-y-3 text-xs">
-                <p className="font-semibold text-emerald-300">
-                  Session de paiement sécurisée créée auprès de {paymentConfig.activeProvider.toUpperCase()} :
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold text-emerald-300">
+                    Session sécurisée {paymentConfig.activeProvider.toUpperCase()} prête
+                  </p>
+                  <span className="font-mono text-[11px] text-zinc-300">Réf : {pendingRef}</span>
+                </div>
+
                 <a
                   href={externalPaymentUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold"
+                  className="inline-flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold"
                 >
-                  <span>Ouvrir la page sécurisée du prestataire</span>
+                  <span>1. Ouvrir la page de paiement officielle</span>
                   <ExternalLink className="w-4 h-4" />
                 </a>
+
+                <div className="pt-2 border-t border-emerald-800/50 space-y-2">
+                  {paymentConfig.activeProvider !== 'cinetpay' && (
+                    <input
+                      type="text"
+                      value={pendingTxId}
+                      onChange={(e) => setPendingTxId(e.target.value)}
+                      placeholder="ID de transaction (si demandé après validation)"
+                      className="w-full px-3 py-1.5 rounded bg-zinc-950 border border-zinc-700 text-[11px] text-slate-100"
+                    />
+                  )}
+                  <button
+                    type="button"
+                    disabled={verifyingExternal}
+                    onClick={handleVerifyExternalPayment}
+                    className="w-full py-2 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${verifyingExternal ? 'animate-spin' : ''}`} />
+                    <span>{verifyingExternal ? 'Vérification en cours...' : '2. J’ai terminé — Vérifier mon paiement'}</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -443,7 +593,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               </div>
             </div>
 
-            {/* Method-specific safe instructions (never collecting raw card numbers locally) */}
+            {/* Method-specific safe instructions */}
             {selectedMethod.includes('momo') ? (
               <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-2.5">
                 <label className="text-xs text-slate-200 font-medium block">
@@ -575,7 +725,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               <div className="flex justify-between pb-2 border-b border-zinc-800">
                 <span className="text-zinc-400">Montant :</span>
                 <span className="font-mono font-bold text-[#D4AF37] tabular-nums">
-                  {confirmedOrder.amount} {confirmedOrder.currency}
+                  {confirmedOrder.amount.toLocaleString('fr-FR')} {confirmedOrder.currency}
                 </span>
               </div>
               <div className="flex justify-between">

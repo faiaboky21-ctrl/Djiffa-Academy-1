@@ -160,6 +160,7 @@ export interface Order {
   currency: Currency;
   paymentMethod: PaymentMethod;
   paymentProvider: 'FedaPay' | 'KKiaPay' | 'CinetPay' | 'Stripe/Cartes';
+  providerTransactionId?: string;
   status: PaymentStatus;
   isDemoTransaction?: boolean;
   promoCodeUsed?: string;

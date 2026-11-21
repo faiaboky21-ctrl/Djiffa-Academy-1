@@ -143,7 +143,8 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
                     Programme Détaillé du Cours
                   </h2>
                   <p className="text-xs text-zinc-400 mt-1">
-                    {course.modulesCount} modules structurés · {course.lessonsCount} leçons pratiques
+                    {course.modules.length || course.modulesCount} modules structurés ·{' '}
+                    {course.modules.reduce((acc, m) => acc + m.lessons.length, 0) || course.lessonsCount} leçons pratiques
                   </p>
                 </div>
 

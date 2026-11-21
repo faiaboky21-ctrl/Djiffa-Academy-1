@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: djiffa-academy
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: APP_URL
+        sync: false
+      - key: ADMIN_EMAIL
+        value: faith.ariola@djiffa-agency.com
+      - key: ADMIN_ACCESS_CODE
+        sync: false
+      - key: ADMIN_SESSION_SECRET
+        generateValue: true
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: PAYMENT_PROVIDER
+        value: fedapay
+      - key: PAYMENT_MODE
+        value: sandbox
+      - key: FEDAPAY_PUBLIC_KEY
+        sync: false
+      - key: FEDAPAY_SECRET_KEY
+        sync: false
+      - key: FEDAPAY_WEBHOOK_SECRET
+        sync: false
+      - key: KKIAPAY_PUBLIC_KEY
+        sync: false
+      - key: KKIAPAY_PRIVATE_KEY
+        sync: false
+      - key: KKIAPAY_SECRET
+        sync: false
+      - key: CINETPAY_API_KEY
+        sync: false
+      - key: CINETPAY_SITE_ID
+        sync: false
+      - key: CINETPAY_SECRET_KEY
+        sync: false

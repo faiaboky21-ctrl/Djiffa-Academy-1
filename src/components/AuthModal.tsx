@@ -1,19 +1,22 @@
 /**
  * DJIFFA ACADEMY - Authentication Modal
- * Separates Student Accounts (Create / Sign In) from Private Director/Admin Access
+ * Supports both Real Supabase Auth (Email + Password) when configured and Local Demo Fallback
+ * Strictly separates Student Accounts from Private Director/Admin Access
  */
 
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { X, GraduationCap, ShieldCheck, Lock, UserPlus, LogIn, AlertCircle, Info } from 'lucide-react';
+import { X, GraduationCap, ShieldCheck, Lock, UserPlus, LogIn, AlertCircle, Info, CheckCircle2 } from 'lucide-react';
 
 export const AuthModal: React.FC = () => {
   const {
     authModalOpen,
     authModalMode,
     closeAuthModal,
-    loginStudent,
-    registerUser,
+    supabaseReady,
+    adminSessionExpiredNotice,
+    signInWithEmailPassword,
+    signUpWithEmailPassword,
     loginAsDemoStudent,
     loginAdminServer
   } = useApp();
@@ -25,6 +28,7 @@ export const AuthModal: React.FC = () => {
   // Student fields
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [phone, setPhone] = useState('');
   const [country, setCountry] = useState('Bénin');
 
@@ -33,37 +37,65 @@ export const AuthModal: React.FC = () => {
   const [adminCode, setAdminCode] = useState('');
 
   const [error, setError] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     setTab(authModalMode === 'admin' ? 'admin' : 'login');
     setError('');
+    setInfoMessage('');
   }, [authModalMode, authModalOpen]);
 
   if (!authModalOpen) return null;
 
-  const handleStudentLogin = (e: React.FormEvent) => {
+  const handleStudentLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    const res = loginStudent(email);
-    if (!res.ok) {
-      setError(res.message || 'Connexion impossible.');
+    setInfoMessage('');
+    setLoading(true);
+    try {
+      const res = await signInWithEmailPassword(email, password);
+      if (!res.ok) {
+        setError(res.message || 'Connexion impossible.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erreur de connexion.');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleStudentRegister = (e: React.FormEvent) => {
+  const handleStudentRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setInfoMessage('');
     if (!name.trim() || !email.trim()) {
       setError('Veuillez renseigner votre nom complet et votre email.');
       return;
     }
-    registerUser(name, email, phone, country);
+    if (supabaseReady && password.length < 6) {
+      setError('Votre mot de passe doit contenir au moins 6 caractères.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await signUpWithEmailPassword(name, email, password, phone, country);
+      if (!res.ok) {
+        setError(res.message || 'Inscription impossible.');
+      } else if (res.needsConfirmation) {
+        setInfoMessage(res.message || 'Compte créé ! Vérifiez votre email pour activer votre accès.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Inscription impossible.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setInfoMessage('');
     setLoading(true);
     const res = await loginAdminServer(adminEmail, adminCode);
     setLoading(false);
@@ -75,7 +107,7 @@ export const AuthModal: React.FC = () => {
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
       <div className="relative w-full max-w-md rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl overflow-hidden my-8">
-        
+
         {/* Header */}
         <div className="p-5 border-b border-zinc-800/80 flex items-center justify-between bg-zinc-900/50">
           <div className="flex items-center gap-2.5">
@@ -87,7 +119,11 @@ export const AuthModal: React.FC = () => {
                 {tab === 'admin' ? 'Accès Direction Privé' : 'Espace Membre DJIFFA ACADEMY'}
               </h3>
               <p className="text-[11px] text-zinc-400">
-                {tab === 'admin' ? 'Réservé à Faith Ariola' : 'Apprenants & Créateurs'}
+                {tab === 'admin'
+                  ? 'Réservé à Faith Ariola'
+                  : supabaseReady
+                  ? 'Compte Cloud Sécurisé Supabase'
+                  : 'Apprenants & Créateurs'}
               </p>
             </div>
           </div>
@@ -104,7 +140,7 @@ export const AuthModal: React.FC = () => {
         <div className="p-2 bg-zinc-900/70 border-b border-zinc-800 grid grid-cols-3 gap-1">
           <button
             type="button"
-            onClick={() => { setTab('login'); setError(''); }}
+            onClick={() => { setTab('login'); setError(''); setInfoMessage(''); }}
             className={`py-2 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               tab === 'login' ? 'bg-[#D4AF37] text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'
             }`}
@@ -113,7 +149,7 @@ export const AuthModal: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => { setTab('register'); setError(''); }}
+            onClick={() => { setTab('register'); setError(''); setInfoMessage(''); }}
             className={`py-2 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               tab === 'register' ? 'bg-[#D4AF37] text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'
             }`}
@@ -122,7 +158,7 @@ export const AuthModal: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => { setTab('admin'); setError(''); }}
+            onClick={() => { setTab('admin'); setError(''); setInfoMessage(''); }}
             className={`py-2 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               tab === 'admin' ? 'bg-zinc-800 text-[#F3E5AB] border border-[#D4AF37]/40' : 'text-zinc-500 hover:text-zinc-300'
             }`}
@@ -136,6 +172,13 @@ export const AuthModal: React.FC = () => {
             <div className="p-3 rounded-lg bg-red-950/60 border border-red-800 text-xs text-red-300 flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {infoMessage && (
+            <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-700 text-xs text-emerald-200 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{infoMessage}</span>
             </div>
           )}
 
@@ -154,21 +197,38 @@ export const AuthModal: React.FC = () => {
                 />
               </div>
 
+              {supabaseReady && (
+                <div>
+                  <label className="text-zinc-400 block mb-1">Mot de passe *</label>
+                  <input
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                  />
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="w-full py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
+                disabled={loading}
+                className="w-full py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 <LogIn className="w-4 h-4" />
-                <span>Accéder à mon espace</span>
+                <span>{loading ? 'Connexion...' : 'Accéder à mon espace'}</span>
               </button>
 
               <div className="pt-3 border-t border-zinc-800/80 space-y-2">
-                <div className="p-3 rounded-lg bg-zinc-900/70 border border-zinc-800 text-[11px] text-zinc-400 flex items-start gap-2">
-                  <Info className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
-                  <span>
-                    Mode Démonstration : aucune base de données cloud externe connectée. Vous pouvez tester l’expérience élève immédiatement.
-                  </span>
-                </div>
+                {!supabaseReady && (
+                  <div className="p-3 rounded-lg bg-zinc-900/70 border border-zinc-800 text-[11px] text-zinc-400 flex items-start gap-2">
+                    <Info className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
+                    <span>
+                      Mode Local : variables Supabase non renseignées. Vos données sont sauvegardées sur cet appareil et vous pouvez tester le compte démo ci-dessous.
+                    </span>
+                  </div>
+                )}
                 <button
                   type="button"
                   onClick={loginAsDemoStudent}
@@ -207,6 +267,21 @@ export const AuthModal: React.FC = () => {
                 />
               </div>
 
+              {supabaseReady && (
+                <div>
+                  <label className="text-zinc-400 block mb-1">Mot de passe * (6 caractères min.)</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Choisissez un mot de passe sécurisé"
+                    className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                  />
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-zinc-400 block mb-1">Téléphone WhatsApp</label>
@@ -232,10 +307,11 @@ export const AuthModal: React.FC = () => {
 
               <button
                 type="submit"
-                className="w-full py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer mt-2"
+                disabled={loading}
+                className="w-full py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer mt-2 disabled:opacity-50"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>Créer mon compte Apprenant</span>
+                <span>{loading ? 'Création du compte...' : 'Créer mon compte Apprenant'}</span>
               </button>
             </form>
           )}
@@ -243,6 +319,13 @@ export const AuthModal: React.FC = () => {
           {/* Admin Private Login */}
           {tab === 'admin' && (
             <form onSubmit={handleAdminLogin} className="space-y-4 text-xs">
+              {adminSessionExpiredNotice && (
+                <div className="p-3 rounded-lg bg-amber-950/60 border border-[#D4AF37]/60 text-[11px] text-[#F3E5AB] flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
+                  <span>{adminSessionExpiredNotice}</span>
+                </div>
+              )}
+
               <div className="p-3 rounded-lg bg-amber-950/20 border border-[#D4AF37]/30 text-[11px] text-[#F3E5AB] flex items-start gap-2">
                 <Lock className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
                 <span>

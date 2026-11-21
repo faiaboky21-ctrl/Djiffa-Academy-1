@@ -52,12 +52,13 @@
   background: #D4AF37;
 }
 
-/* Print styles for certificates */
+/* Print styles for certificates without breaking normal/receipt printing */
 @media print {
-  body * {
+  body:has(#printable-certificate) * {
     visibility: hidden;
   }
-  #printable-certificate, #printable-certificate * {
+  body:has(#printable-certificate) #printable-certificate,
+  body:has(#printable-certificate) #printable-certificate * {
     visibility: visible;
   }
   #printable-certificate {

@@ -3,7 +3,7 @@
  * Only issued when course completion criteria are genuinely met
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { X, Printer, Award, ShieldCheck } from 'lucide-react';
 
@@ -16,7 +16,15 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({ courseId, on
   const { courses, currentUser, claimCertificate, siteSettings } = useApp();
 
   const course = courses.find((c) => c.id === courseId) || courses[0];
-  const cert = currentUser?.certificates.find((c) => c.courseId === courseId) || claimCertificate(course.id);
+  const existingCert = currentUser?.certificates.find((c) => c.courseId === courseId);
+
+  useEffect(() => {
+    if (currentUser && course && !existingCert) {
+      claimCertificate(course.id);
+    }
+  }, [currentUser?.id, course?.id, existingCert]);
+
+  const cert = existingCert;
 
   if (!cert) {
     return (

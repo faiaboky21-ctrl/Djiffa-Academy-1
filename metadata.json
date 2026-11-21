@@ -1,0 +1,6 @@
+{
+  "name": "DJIFFA ACADEMY - École Numérique Internationale",
+  "description": "Plateforme internationale de formation, de vente et d'accompagnement professionnel créée par Faith Ariola (DJIFFA DESIGN AGENCY).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

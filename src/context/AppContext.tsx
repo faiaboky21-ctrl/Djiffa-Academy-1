@@ -146,7 +146,19 @@ interface AppContextType {
     phoneOrCard: string,
     options?: { promoCode?: string; discountPercent?: number; isDemoMode?: boolean; transactionId?: string; reference?: string }
   ) => Promise<{ success: boolean; isDemoRecorded?: boolean; order: Order; message?: string }>;
-  verifyExistingPayment: (reference: string, transactionId?: string, courseId?: string) => Promise<{ ok: boolean; verified: boolean; message?: string }>;
+  verifyExistingPayment: (
+    reference: string,
+    transactionId?: string,
+    courseId?: string
+  ) => Promise<{
+    ok: boolean;
+    verified: boolean;
+    finalFailure?: boolean;
+    temporaryError?: boolean;
+    status?: Order['status'];
+    providerStatus?: string;
+    message?: string;
+  }>;
   refreshServerPaymentStatus: () => Promise<void>;
 
   // Coaching & Contact
@@ -981,10 +993,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         const data = await res.json();
         if (res.ok && data.verified) {
+          const confirmedTxId = data.transactionId ? String(data.transactionId) : transactionId;
           setOrders((prev) =>
             prev.map((o) =>
               o.reference === reference
-                ? { ...o, status: 'confirmed', providerTransactionId: transactionId || o.providerTransactionId, confirmedAt: new Date().toISOString() }
+                ? {
+                    ...o,
+                    status: 'confirmed',
+                    providerTransactionId: confirmedTxId || o.providerTransactionId,
+                    confirmedAt: o.confirmedAt || new Date().toISOString()
+                  }
                 : o
             )
           );
@@ -1004,18 +1022,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             `Votre transaction (${reference}) a été vérifiée et confirmée par le prestataire.`,
             'purchase'
           );
-          return { ok: true, verified: true, message: 'Paiement vérifié et accès activé.' };
+          return {
+            ok: true,
+            verified: true,
+            status: 'confirmed' as const,
+            providerStatus: data.providerStatus,
+            message: 'Paiement vérifié et accès activé.'
+          };
         }
+
+        const isTemporary = Boolean(data.temporaryError) || res.status >= 500;
+        const reportedStatus: Order['status'] =
+          !isTemporary && (data.status === 'failed' || data.status === 'cancelled' || data.status === 'refunded')
+            ? data.status
+            : 'pending';
+        const isFinalFailure =
+          !isTemporary &&
+          (Boolean(data.finalFailure) ||
+            reportedStatus === 'failed' ||
+            reportedStatus === 'cancelled' ||
+            reportedStatus === 'refunded');
+
+        if (isFinalFailure) {
+          const syncedTxId = data.transactionId ? String(data.transactionId) : transactionId;
+          setOrders((prev) =>
+            prev.map((o) =>
+              o.reference === reference && o.status !== 'confirmed'
+                ? {
+                    ...o,
+                    status: reportedStatus,
+                    providerTransactionId: syncedTxId || o.providerTransactionId
+                  }
+                : o
+            )
+          );
+        }
+
         return {
           ok: false,
           verified: false,
-          message: data.error || `Transaction en statut : ${data.status || 'en attente'}.`
+          finalFailure: isFinalFailure,
+          temporaryError: isTemporary,
+          status: reportedStatus,
+          providerStatus: data.providerStatus,
+          message:
+            data.error ||
+            (reportedStatus === 'failed'
+              ? 'La transaction a été refusée par le prestataire.'
+              : reportedStatus === 'cancelled'
+              ? 'La transaction a été annulée ou a expiré.'
+              : `Transaction en statut : ${data.providerStatus || data.status || 'en attente'}.`)
         };
       } catch (err) {
         return {
           ok: false,
           verified: false,
-          message: err instanceof Error ? err.message : 'Erreur lors de la vérification.'
+          finalFailure: false,
+          temporaryError: true,
+          status: 'pending' as const,
+          message:
+            err instanceof Error
+              ? err.message
+              : 'Vérification temporairement indisponible. La commande reste en attente.'
         };
       }
     },
@@ -1055,9 +1123,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (async () => {
       const result = await verifyExistingPayment(paymentRef, txId);
       if (result.verified) {
+        if (isSupabaseConfigured && supabase) {
+          const { data } = await supabase.auth.getSession();
+          if (data.session?.user) {
+            await hydrateSupabaseUser(data.session.user.id, data.session.user.email);
+          }
+        }
         setPaymentReturnNotice({
           type: 'success',
           message: `Paiement confirmé (${paymentRef}). Votre formation est désormais accessible dans votre Espace Apprenant.`
+        });
+      } else if (result.finalFailure) {
+        setPaymentReturnNotice({
+          type: 'error',
+          message: `Paiement non validé (${paymentRef}) : ${result.message || 'Transaction refusée ou annulée.'}`
         });
       } else {
         setPaymentReturnNotice({
@@ -1669,7 +1748,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       const verifyData = await verifyRes.json();
       if (!verifyRes.ok || !verifyData.verified) {
-        const failedOrder: Order = {
+        const isTemporary = Boolean(verifyData.temporaryError) || verifyRes.status >= 500;
+        const resolvedStatus: Order['status'] =
+          !isTemporary &&
+          (verifyData.status === 'failed' || verifyData.status === 'cancelled' || verifyData.status === 'refunded')
+            ? verifyData.status
+            : 'pending';
+        const nonConfirmedOrder: Order = {
           id: `ord-${Date.now()}`,
           reference: orderRef,
           userId: currentUser.id,
@@ -1682,16 +1767,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           paymentMethod,
           paymentProvider: provider,
           providerTransactionId: options?.transactionId,
-          status: 'pending',
-          isDemoTransaction: false,
+          status: resolvedStatus,
+          isDemoTransaction: paymentConfig.isTestMode,
           promoCodeUsed: options?.promoCode,
           customerPhone: phoneOrCard,
           createdAt: new Date().toISOString()
         };
-        setOrders((prev) => [failedOrder, ...prev]);
+        setOrders((prev) => [nonConfirmedOrder, ...prev]);
         return {
           success: false,
-          order: failedOrder,
+          order: nonConfirmedOrder,
           message: verifyData.error || 'Paiement en attente de confirmation réelle auprès du prestataire.'
         };
       }

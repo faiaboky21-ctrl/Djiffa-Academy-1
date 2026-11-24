@@ -26,8 +26,17 @@ const isProduction = process.env.NODE_ENV === 'production';
 // Ephemeral in-memory fallback if ADMIN_SESSION_SECRET isn't provided in env
 const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
-// Idempotency store for verified payment references
+// Idempotency stores for verified payment references & processed webhook events
 const processedTransactions = new Map<string, { status: string; verifiedAt: string; provider: string }>();
+const processedWebhookEvents = new Set<string>();
+
+function rememberWebhookEvent(key: string) {
+  if (processedWebhookEvents.size >= 1000) {
+    const oldest = processedWebhookEvents.values().next().value;
+    if (oldest) processedWebhookEvents.delete(oldest);
+  }
+  processedWebhookEvents.add(key);
+}
 
 interface ServerPaymentEvent {
   id: string;
@@ -277,14 +286,17 @@ async function resolveCallerAuth(req: express.Request): Promise<{
 }
 
 async function activateOrderEnrollmentInSupabase(reference: string, providerTransactionId?: string) {
-  if (!supabaseAdmin) return;
+  if (!supabaseAdmin) return { ok: false, skipped: true };
   const { data: orderRow, error: fetchErr } = await supabaseAdmin
     .from('orders')
     .select('*')
     .eq('reference', reference)
     .maybeSingle();
 
-  if (fetchErr || !orderRow) return;
+  if (fetchErr || !orderRow) return { ok: false, error: fetchErr?.message || 'Commande introuvable.' };
+  if (orderRow.status === 'refunded') {
+    return { ok: false, error: 'Commande déjà remboursée.' };
+  }
 
   let targetUserId: string | null = orderRow.user_id || null;
   if (!targetUserId && orderRow.user_email) {
@@ -298,18 +310,25 @@ async function activateOrderEnrollmentInSupabase(reference: string, providerTran
     }
   }
 
-  await supabaseAdmin
+  const nextTxId = providerTransactionId || orderRow.provider_transaction_id || null;
+  const alreadyConfirmed = orderRow.status === 'confirmed';
+
+  const { error: updateErr } = await supabaseAdmin
     .from('orders')
     .update({
       status: 'confirmed',
       user_id: targetUserId,
-      provider_transaction_id: providerTransactionId || orderRow.provider_transaction_id,
+      provider_transaction_id: nextTxId,
       confirmed_at: orderRow.confirmed_at || new Date().toISOString()
     })
     .eq('reference', reference);
 
+  if (updateErr) {
+    return { ok: false, error: updateErr.message };
+  }
+
   if (targetUserId && orderRow.course_id) {
-    await supabaseAdmin.from('enrollments').upsert(
+    const { error: enrollErr } = await supabaseAdmin.from('enrollments').upsert(
       {
         user_id: targetUserId,
         course_id: orderRow.course_id,
@@ -317,20 +336,74 @@ async function activateOrderEnrollmentInSupabase(reference: string, providerTran
       },
       { onConflict: 'user_id,course_id' }
     );
+    if (enrollErr) {
+      return { ok: false, error: enrollErr.message };
+    }
   }
+
+  return { ok: true, alreadyConfirmed };
 }
 
-async function revokeOrderEnrollmentInSupabase(reference: string, newStatus: 'refunded' | 'cancelled' | 'failed') {
-  if (!supabaseAdmin) return;
+async function syncNonConfirmedOrderStatusInSupabase(
+  reference: string,
+  newStatus: 'pending' | 'processing' | 'failed' | 'cancelled',
+  providerTransactionId?: string
+): Promise<{ found: boolean; alreadyInState: boolean; lockedStatus?: string }> {
+  if (!supabaseAdmin) return { found: false, alreadyInState: false };
+  const { data: orderRow, error: fetchErr } = await supabaseAdmin
+    .from('orders')
+    .select('status, provider_transaction_id')
+    .eq('reference', reference)
+    .maybeSingle();
+
+  if (fetchErr || !orderRow) return { found: false, alreadyInState: false };
+
+  // Never downgrade a confirmed or refunded order via delayed/out-of-order pending or failure signals
+  if (orderRow.status === 'confirmed' || orderRow.status === 'refunded') {
+    return { found: true, alreadyInState: true, lockedStatus: orderRow.status };
+  }
+
+  const txIdUnchanged = !providerTransactionId || orderRow.provider_transaction_id === providerTransactionId;
+  if (orderRow.status === newStatus && txIdUnchanged) {
+    return { found: true, alreadyInState: true };
+  }
+
+  const updatePayload: Record<string, unknown> = { status: newStatus };
+  if (providerTransactionId && !orderRow.provider_transaction_id) {
+    updatePayload.provider_transaction_id = providerTransactionId;
+  }
+
+  await supabaseAdmin.from('orders').update(updatePayload).eq('reference', reference);
+  return { found: true, alreadyInState: false };
+}
+
+async function revokeOrderEnrollmentInSupabase(
+  reference: string,
+  newStatus: 'refunded' | 'cancelled' | 'failed',
+  providerTransactionId?: string
+) {
+  if (!supabaseAdmin) return { found: false, alreadyInState: false };
   const { data: orderRow } = await supabaseAdmin
     .from('orders')
     .select('*')
     .eq('reference', reference)
     .maybeSingle();
 
-  if (!orderRow) return;
+  if (!orderRow) return { found: false, alreadyInState: false };
 
-  await supabaseAdmin.from('orders').update({ status: newStatus }).eq('reference', reference);
+  const alreadyInState =
+    orderRow.status === newStatus &&
+    (!providerTransactionId || orderRow.provider_transaction_id === providerTransactionId);
+
+  await supabaseAdmin
+    .from('orders')
+    .update({
+      status: newStatus,
+      ...(providerTransactionId && !orderRow.provider_transaction_id
+        ? { provider_transaction_id: providerTransactionId }
+        : {})
+    })
+    .eq('reference', reference);
 
   if (orderRow.user_id && orderRow.course_id) {
     const { data: otherConfirmed } = await supabaseAdmin
@@ -350,6 +423,70 @@ async function revokeOrderEnrollmentInSupabase(reference: string, newStatus: 're
         .eq('course_id', orderRow.course_id);
     }
   }
+
+  return { found: true, alreadyInState };
+}
+
+interface FedaPayTransactionPayload {
+  id?: number | string;
+  reference?: string;
+  status?: string;
+  amount?: number | string;
+  currency?: { iso?: string };
+  custom_metadata?: { reference?: string };
+  last_error?: { message?: string } | string;
+  status_reason?: string;
+}
+
+type FedaPayFetchResult =
+  | { ok: true; tx: FedaPayTransactionPayload }
+  | { ok: false; temporary: boolean; httpStatus?: number; error: string };
+
+async function fetchFedaPayTransaction(transactionId: string, mode: 'sandbox' | 'live'): Promise<FedaPayFetchResult> {
+  const baseUrl = mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
+  try {
+    const response = await fetch(`${baseUrl}/transactions/${encodeURIComponent(transactionId)}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}`,
+        Accept: 'application/json'
+      }
+    });
+    if (!response.ok) {
+      let errMsg = `Réponse API FedaPay HTTP ${response.status}`;
+      try {
+        const errJson = (await response.json()) as { message?: string };
+        if (errJson?.message) errMsg = errJson.message;
+      } catch {
+        // ignore non-JSON body
+      }
+      return {
+        ok: false,
+        temporary: response.status >= 500 || response.status === 429 || response.status === 408,
+        httpStatus: response.status,
+        error: errMsg
+      };
+    }
+    const data = (await response.json()) as { 'v1/transaction'?: FedaPayTransactionPayload };
+    if (!data || !data['v1/transaction']) {
+      return { ok: false, temporary: true, error: 'Réponse FedaPay incomplète (v1/transaction absent).' };
+    }
+    return { ok: true, tx: data['v1/transaction'] };
+  } catch (err) {
+    return {
+      ok: false,
+      temporary: true,
+      error: err instanceof Error ? err.message : 'Erreur réseau temporaire lors de la vérification FedaPay.'
+    };
+  }
+}
+
+function extractFedaPayFailureReason(tx: FedaPayTransactionPayload): string | undefined {
+  if (typeof tx.status_reason === 'string' && tx.status_reason.trim()) return tx.status_reason.trim();
+  if (typeof tx.last_error === 'string' && tx.last_error.trim()) return tx.last_error.trim();
+  if (tx.last_error && typeof tx.last_error === 'object' && typeof tx.last_error.message === 'string' && tx.last_error.message.trim()) {
+    return tx.last_error.message.trim();
+  }
+  return undefined;
 }
 
 function sanitizeStorageObjectPath(rawPath: string): string | null {
@@ -795,7 +932,7 @@ async function startServer() {
 
       const { data: existingOrder, error: existingOrderErr } = await supabaseAdmin
         .from('orders')
-        .select('status')
+        .select('id, status')
         .eq('reference', String(reference))
         .maybeSingle();
 
@@ -814,32 +951,35 @@ async function startServer() {
         return;
       }
 
-      const { error: orderUpsertErr } = await supabaseAdmin.from('orders').upsert(
-        {
-          id: `ord-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-          reference: String(reference),
-          user_id: resolvedUserId,
-          user_name: String(customerName || 'Apprenant'),
-          user_email: String(customerEmail),
-          course_id: String(courseId),
-          course_title: String(description || 'Formation DJIFFA ACADEMY'),
-          amount: verifiedAmount,
-          currency: normalizedCurrency,
-          payment_method: String(paymentMethod || 'mtn_momo'),
-          payment_provider:
-            status.provider === 'fedapay' ? 'FedaPay' : status.provider === 'kkiapay' ? 'KKiaPay' : 'CinetPay',
-          status: 'pending',
-          is_demo_transaction: status.mode !== 'live',
-          promo_code_used: promoCode ? String(promoCode) : null,
-          customer_phone: customerPhone ? String(customerPhone) : null
-        },
-        { onConflict: 'reference' }
-      );
+      const orderFields = {
+        user_id: resolvedUserId,
+        user_name: String(customerName || 'Apprenant'),
+        user_email: String(customerEmail),
+        course_id: String(courseId),
+        course_title: String(description || 'Formation DJIFFA ACADEMY'),
+        amount: verifiedAmount,
+        currency: normalizedCurrency,
+        payment_method: String(paymentMethod || 'mtn_momo'),
+        payment_provider:
+          status.provider === 'fedapay' ? 'FedaPay' : status.provider === 'kkiapay' ? 'KKiaPay' : 'CinetPay',
+        status: 'pending',
+        is_demo_transaction: status.mode !== 'live',
+        promo_code_used: promoCode ? String(promoCode) : null,
+        customer_phone: customerPhone ? String(customerPhone) : null
+      };
 
-      if (orderUpsertErr) {
+      const { error: orderWriteErr } = existingOrder
+        ? await supabaseAdmin.from('orders').update(orderFields).eq('reference', String(reference))
+        : await supabaseAdmin.from('orders').insert({
+            id: `ord-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+            reference: String(reference),
+            ...orderFields
+          });
+
+      if (orderWriteErr) {
         res.status(500).json({
           ok: false,
-          error: `Impossible d’enregistrer la commande avant paiement : ${orderUpsertErr.message}`
+          error: `Impossible d’enregistrer la commande avant paiement : ${orderWriteErr.message}`
         });
         return;
       }
@@ -881,11 +1021,20 @@ async function startServer() {
         }
 
         const tx = data['v1/transaction'];
+        const fedaTxId = tx?.id !== undefined && tx?.id !== null ? String(tx.id) : null;
         let paymentUrl = tx?.payment_url || null;
 
+        // Persist the FedaPay transaction ID on the existing order immediately (no duplicate order created)
+        if (supabaseAdmin && fedaTxId) {
+          await supabaseAdmin
+            .from('orders')
+            .update({ provider_transaction_id: fedaTxId })
+            .eq('reference', String(reference));
+        }
+
         // Generate hosted checkout token URL via FedaPay /transactions/:id/token when needed
-        if (!paymentUrl && tx?.id) {
-          const tokenRes = await fetch(`${baseUrl}/transactions/${encodeURIComponent(String(tx.id))}/token`, {
+        if (!paymentUrl && fedaTxId) {
+          const tokenRes = await fetch(`${baseUrl}/transactions/${encodeURIComponent(fedaTxId)}/token`, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}`,
@@ -903,7 +1052,7 @@ async function startServer() {
           provider: 'fedapay',
           event: 'create_session',
           status: 'pending',
-          detail: `Session créée (${normalizedCurrency} ${verifiedAmount})`
+          detail: `Session créée (${normalizedCurrency} ${verifiedAmount}${fedaTxId ? `, Tx ${fedaTxId}` : ''})`
         });
 
         res.json({
@@ -980,9 +1129,21 @@ async function startServer() {
       return;
     }
 
-    if (processedTransactions.has(String(reference))) {
-      const existing = processedTransactions.get(String(reference));
-      res.json({ ok: true, alreadyVerified: true, verified: existing?.status === 'confirmed', status: existing?.status });
+    const cleanRef = String(reference).trim();
+    const cachedTx = processedTransactions.get(cleanRef);
+    if (cachedTx?.status === 'confirmed') {
+      res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
+      return;
+    }
+    if (cachedTx?.status === 'refunded') {
+      res.json({
+        ok: false,
+        alreadyVerified: true,
+        verified: false,
+        finalFailure: true,
+        status: 'refunded',
+        error: 'Cette commande a déjà été remboursée.'
+      });
       return;
     }
 
@@ -997,18 +1158,25 @@ async function startServer() {
 
     let storedOrderAmount: number | null = null;
     let storedOrderCurrency: string | null = null;
+    let storedOrderStatus: string | null = null;
+    let storedProviderTxId: string | null = null;
+
     if (supabaseAdmin) {
       const { data: orderRow, error: orderErr } = await supabaseAdmin
         .from('orders')
-        .select('amount, currency, status')
-        .eq('reference', String(reference))
+        .select('amount, currency, status, provider_transaction_id')
+        .eq('reference', cleanRef)
         .maybeSingle();
       if (orderErr) {
-        res.status(503).json({ ok: false, error: 'Impossible de contrôler la commande auprès de Supabase.' });
+        res.status(503).json({
+          ok: false,
+          temporaryError: true,
+          error: 'Impossible de contrôler la commande auprès de Supabase pour le moment.'
+        });
         return;
       }
       if (orderRow?.status === 'confirmed') {
-        processedTransactions.set(String(reference), {
+        processedTransactions.set(cleanRef, {
           status: 'confirmed',
           verifiedAt: new Date().toISOString(),
           provider: status.provider
@@ -1016,57 +1184,212 @@ async function startServer() {
         res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
         return;
       }
-      if (orderRow && typeof orderRow.amount === 'number') {
-        storedOrderAmount = orderRow.amount;
+      if (orderRow?.status === 'refunded') {
+        processedTransactions.set(cleanRef, {
+          status: 'refunded',
+          verifiedAt: new Date().toISOString(),
+          provider: status.provider
+        });
+        res.json({
+          ok: false,
+          alreadyVerified: true,
+          verified: false,
+          finalFailure: true,
+          status: 'refunded',
+          error: 'Cette commande a été remboursée.'
+        });
+        return;
+      }
+      if (orderRow) {
+        if (typeof orderRow.amount === 'number') storedOrderAmount = orderRow.amount;
         storedOrderCurrency = orderRow.currency || null;
+        storedOrderStatus = orderRow.status || null;
+        storedProviderTxId = orderRow.provider_transaction_id ? String(orderRow.provider_transaction_id).trim() : null;
       }
     }
 
-    try {
-      if (status.provider === 'fedapay' && transactionId) {
-        const baseUrl = status.mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
-        const response = await fetch(`${baseUrl}/transactions/${encodeURIComponent(String(transactionId))}`, {
-          headers: { Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}` }
-        });
-        const data = (await response.json()) as {
-          'v1/transaction'?: {
-            status?: string;
-            amount?: number;
-            currency?: { iso?: string };
-            custom_metadata?: { reference?: string };
-          };
-        };
-        const tx = data['v1/transaction'];
-        const txStatus = tx?.status;
-        const metadataRef = tx?.custom_metadata?.reference;
-        const refMatches = !metadataRef || String(metadataRef) === String(reference);
-        const amountMatches =
-          storedOrderAmount === null || (tx?.amount !== undefined && Number(tx.amount) + 2 >= storedOrderAmount);
-        const currencyMatches =
-          !storedOrderCurrency || !tx?.currency?.iso || String(tx.currency.iso).toUpperCase() === storedOrderCurrency;
+    const resolvedTxId =
+      transactionId !== undefined && transactionId !== null && String(transactionId).trim()
+        ? String(transactionId).trim()
+        : storedProviderTxId || '';
 
-        if (txStatus === 'approved' && refMatches && amountMatches && currencyMatches) {
-          processedTransactions.set(String(reference), {
+    try {
+      if (status.provider === 'fedapay') {
+        if (!resolvedTxId) {
+          res.status(400).json({
+            ok: false,
+            verified: false,
+            error: 'Identifiant de transaction FedaPay manquant pour la vérification.'
+          });
+          return;
+        }
+
+        const fedaRes = await fetchFedaPayTransaction(resolvedTxId, status.mode);
+        if (!fedaRes.ok) {
+          // Condition 7: never declare a payment failed because a temporary verification call failed
+          res.status(fedaRes.temporary ? 503 : 502).json({
+            ok: false,
+            verified: false,
+            temporaryError: true,
+            status: storedOrderStatus || 'pending',
+            error: `Vérification temporairement impossible auprès de FedaPay (${fedaRes.error}). La commande n’a pas été marquée comme échouée ; veuillez réessayer.`
+          });
+          return;
+        }
+
+        const tx = fedaRes.tx;
+        const txStatus = String(tx.status || '').trim().toLowerCase();
+        const metadataRef = tx.custom_metadata?.reference;
+        const refMatches = !metadataRef || String(metadataRef) === cleanRef;
+        const amountMatches =
+          storedOrderAmount === null ||
+          (tx.amount !== undefined && Number.isFinite(Number(tx.amount)) && Number(tx.amount) + 2 >= storedOrderAmount);
+        const currencyMatches =
+          !storedOrderCurrency || !tx.currency?.iso || String(tx.currency.iso).toUpperCase() === storedOrderCurrency;
+
+        if (txStatus === 'approved' || txStatus === 'transferred') {
+          if (!refMatches || !amountMatches || !currencyMatches) {
+            recordPaymentEvent({
+              reference: cleanRef,
+              provider: 'fedapay',
+              event: 'verify_mismatch',
+              status: 'pending',
+              detail: `Incohérence FedaPay Tx ${resolvedTxId} (ref=${refMatches}, montant=${amountMatches}, devise=${currencyMatches})`
+            });
+            res.status(400).json({
+              ok: false,
+              verified: false,
+              status: 'pending',
+              providerStatus: txStatus,
+              error: 'Incohérence de référence, montant ou devise détectée lors du contrôle FedaPay.'
+            });
+            return;
+          }
+
+          processedTransactions.set(cleanRef, {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
             provider: 'fedapay'
           });
           recordPaymentEvent({
-            reference: String(reference),
+            reference: cleanRef,
             provider: 'fedapay',
             event: 'verify',
             status: 'confirmed',
-            detail: `Transaction ${transactionId} approuvée`
+            detail: `Transaction ${resolvedTxId} vérifiée (${txStatus})`
           });
-          await activateOrderEnrollmentInSupabase(String(reference), String(transactionId));
-          res.json({ ok: true, verified: true, status: 'confirmed' });
+          await activateOrderEnrollmentInSupabase(cleanRef, resolvedTxId);
+          res.json({
+            ok: true,
+            verified: true,
+            status: 'confirmed',
+            providerStatus: txStatus,
+            transactionId: resolvedTxId
+          });
           return;
         }
-        res.json({ ok: false, verified: false, status: txStatus || 'pending' });
+
+        if (txStatus === 'declined' || txStatus === 'failed') {
+          const failureReason = extractFedaPayFailureReason(tx);
+          await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'failed', resolvedTxId);
+          processedTransactions.set(cleanRef, {
+            status: 'failed',
+            verifiedAt: new Date().toISOString(),
+            provider: 'fedapay'
+          });
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'verify',
+            status: 'failed',
+            detail: `Transaction ${resolvedTxId} refusée (${txStatus}${failureReason ? ` : ${failureReason}` : ''})`
+          });
+          res.json({
+            ok: false,
+            verified: false,
+            finalFailure: true,
+            status: 'failed',
+            providerStatus: txStatus,
+            transactionId: resolvedTxId,
+            error: failureReason
+              ? `Transaction refusée par FedaPay : ${failureReason}`
+              : 'Transaction refusée par FedaPay (declined).'
+          });
+          return;
+        }
+
+        if (txStatus === 'canceled' || txStatus === 'cancelled' || txStatus === 'expired') {
+          await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'cancelled', resolvedTxId);
+          processedTransactions.set(cleanRef, {
+            status: 'cancelled',
+            verifiedAt: new Date().toISOString(),
+            provider: 'fedapay'
+          });
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'verify',
+            status: 'cancelled',
+            detail: `Transaction ${resolvedTxId} ${txStatus === 'expired' ? 'expirée' : 'annulée'} (${txStatus})`
+          });
+          res.json({
+            ok: false,
+            verified: false,
+            finalFailure: true,
+            status: 'cancelled',
+            providerStatus: txStatus,
+            transactionId: resolvedTxId,
+            error:
+              txStatus === 'expired'
+                ? 'La session de paiement a expiré côté FedaPay.'
+                : 'La transaction a été annulée côté FedaPay.'
+          });
+          return;
+        }
+
+        if (txStatus === 'refunded') {
+          await revokeOrderEnrollmentInSupabase(cleanRef, 'refunded', resolvedTxId);
+          processedTransactions.set(cleanRef, {
+            status: 'refunded',
+            verifiedAt: new Date().toISOString(),
+            provider: 'fedapay'
+          });
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'verify',
+            status: 'refunded',
+            detail: `Transaction ${resolvedTxId} remboursée`
+          });
+          res.json({
+            ok: false,
+            verified: false,
+            finalFailure: true,
+            status: 'refunded',
+            providerStatus: 'refunded',
+            transactionId: resolvedTxId,
+            error: 'Cette transaction a été remboursée côté FedaPay.'
+          });
+          return;
+        }
+
+        // Still pending / processing / unknown non-final state -> keep pending (never unlock, never force failed)
+        await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'pending', resolvedTxId);
+        const failureHint = extractFedaPayFailureReason(tx);
+        res.json({
+          ok: false,
+          verified: false,
+          status: 'pending',
+          providerStatus: txStatus || 'pending',
+          transactionId: resolvedTxId,
+          error:
+            failureHint ||
+            'Transaction toujours en attente côté FedaPay (0 FCFA validé). Si la page Sandbox a affiché « Transaction échouée », réessayez avec un numéro de test Sandbox valide (ex. 66000001 MTN / 64000001 Moov).'
+        });
         return;
       }
 
-      if (status.provider === 'kkiapay' && transactionId) {
+      if (status.provider === 'kkiapay' && resolvedTxId) {
         const baseUrl = status.mode === 'live' ? 'https://api.kkiapay.me' : 'https://api-sandbox.kkiapay.me';
         const response = await fetch(`${baseUrl}/api/v1/transactions/status`, {
           method: 'POST',
@@ -1076,25 +1399,35 @@ async function startServer() {
             'x-private-key': process.env.KKIAPAY_PRIVATE_KEY || '',
             'x-secret': process.env.KKIAPAY_SECRET || ''
           },
-          body: JSON.stringify({ transactionId: String(transactionId) })
+          body: JSON.stringify({ transactionId: resolvedTxId })
         });
+        if (!response.ok) {
+          res.status(503).json({
+            ok: false,
+            verified: false,
+            temporaryError: true,
+            status: storedOrderStatus || 'pending',
+            error: `Vérification temporairement impossible auprès de KKiaPay (HTTP ${response.status}).`
+          });
+          return;
+        }
         const data = (await response.json()) as { status?: string; amount?: number };
         const amountMatches =
           storedOrderAmount === null || (data.amount !== undefined && Number(data.amount) + 2 >= storedOrderAmount);
         if (data.status === 'SUCCESS' && amountMatches) {
-          processedTransactions.set(String(reference), {
+          processedTransactions.set(cleanRef, {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
             provider: 'kkiapay'
           });
           recordPaymentEvent({
-            reference: String(reference),
+            reference: cleanRef,
             provider: 'kkiapay',
             event: 'verify',
             status: 'confirmed',
-            detail: `Transaction ${transactionId} approuvée`
+            detail: `Transaction ${resolvedTxId} approuvée`
           });
-          await activateOrderEnrollmentInSupabase(String(reference), String(transactionId));
+          await activateOrderEnrollmentInSupabase(cleanRef, resolvedTxId);
           res.json({ ok: true, verified: true, status: 'confirmed' });
           return;
         }
@@ -1109,9 +1442,19 @@ async function startServer() {
           body: JSON.stringify({
             apikey: process.env.CINETPAY_API_KEY,
             site_id: process.env.CINETPAY_SITE_ID,
-            transaction_id: reference
+            transaction_id: cleanRef
           })
         });
+        if (!response.ok) {
+          res.status(503).json({
+            ok: false,
+            verified: false,
+            temporaryError: true,
+            status: storedOrderStatus || 'pending',
+            error: `Vérification temporairement impossible auprès de CinetPay (HTTP ${response.status}).`
+          });
+          return;
+        }
         const data = (await response.json()) as {
           code?: string;
           data?: { status?: string; amount?: number | string; currency?: string };
@@ -1122,19 +1465,19 @@ async function startServer() {
         const currencyMatches =
           !storedOrderCurrency || !data.data?.currency || String(data.data.currency).toUpperCase() === storedOrderCurrency;
         if (data.code === '00' && data.data?.status === 'ACCEPTED' && amountMatches && currencyMatches) {
-          processedTransactions.set(String(reference), {
+          processedTransactions.set(cleanRef, {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
             provider: 'cinetpay'
           });
           recordPaymentEvent({
-            reference: String(reference),
+            reference: cleanRef,
             provider: 'cinetpay',
             event: 'verify',
             status: 'confirmed',
             detail: `Paiement CinetPay accepté`
           });
-          await activateOrderEnrollmentInSupabase(String(reference), String(transactionId || reference));
+          await activateOrderEnrollmentInSupabase(cleanRef, resolvedTxId || cleanRef);
           res.json({ ok: true, verified: true, status: 'confirmed' });
           return;
         }
@@ -1145,11 +1488,11 @@ async function startServer() {
       res.status(400).json({ ok: false, error: 'Identifiant de transaction manquant pour la vérification.' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur de vérification auprès du prestataire.';
-      res.status(500).json({ ok: false, error: message });
+      res.status(500).json({ ok: false, verified: false, temporaryError: true, error: message });
     }
   });
 
-  // 6. Secure Webhook receiver (HMAC verification + idempotency + Supabase activation/revocation)
+  // 6. Secure Webhook receiver (HMAC verification + idempotency + live FedaPay verification + Supabase activation/revocation)
   app.post('/api/payments/webhook', async (req: express.Request & { rawBody?: Buffer }, res) => {
     const status = getServerPaymentStatus();
     const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
@@ -1226,77 +1569,306 @@ async function startServer() {
       }
     }
 
-    const ref = req.body?.entity?.custom_metadata?.reference || req.body?.cpm_trans_id || req.body?.transactionId;
-    const txId = req.body?.entity?.id || req.body?.transactionId;
-    const eventName = String(req.body?.name || req.body?.event || '').toLowerCase();
-    const entityStatus = String(req.body?.entity?.status || req.body?.status || '').toLowerCase();
+    const rawTxId = req.body?.entity?.id ?? req.body?.transactionId;
+    const cleanTxId = rawTxId !== undefined && rawTxId !== null && String(rawTxId).trim() ? String(rawTxId).trim() : undefined;
+    let rawRef = req.body?.entity?.custom_metadata?.reference || req.body?.cpm_trans_id || req.body?.transactionId;
 
-    if (ref) {
-      const cleanRef = String(ref);
-      const isRefundOrFailure =
-        eventName.includes('refund') ||
-        eventName.includes('declined') ||
-        eventName.includes('cancel') ||
-        entityStatus === 'refunded' ||
-        entityStatus === 'declined' ||
-        entityStatus === 'canceled';
+    if (!rawRef && cleanTxId && supabaseAdmin) {
+      const { data: matchedByTx } = await supabaseAdmin
+        .from('orders')
+        .select('reference')
+        .eq('provider_transaction_id', cleanTxId)
+        .maybeSingle();
+      if (matchedByTx?.reference) {
+        rawRef = matchedByTx.reference;
+      }
+    }
 
-      if (isRefundOrFailure) {
-        const mappedStatus = entityStatus === 'refunded' || eventName.includes('refund') ? 'refunded' : 'cancelled';
-        processedTransactions.set(cleanRef, {
-          status: mappedStatus,
-          verifiedAt: new Date().toISOString(),
-          provider: status.provider
-        });
+    if (!rawRef) {
+      res.json({ ok: true, received: true, ignored: true });
+      return;
+    }
+
+    const cleanRef = String(rawRef).trim();
+    const eventId = req.body?.id !== undefined && req.body?.id !== null ? String(req.body.id).trim() : '';
+    const eventName = String(req.body?.name || req.body?.event || '').trim().toLowerCase();
+    const entityStatus = String(req.body?.entity?.status || req.body?.status || '').trim().toLowerCase();
+
+    const webhookKey = eventId
+      ? `${status.provider}:evt:${eventId}`
+      : `${status.provider}:tx:${cleanTxId || cleanRef}:${eventName}:${entityStatus}`;
+
+    if (processedWebhookEvents.has(webhookKey)) {
+      res.json({ ok: true, idempotent: true, received: true });
+      return;
+    }
+
+    let dbOrder: {
+      status?: string;
+      amount?: number;
+      currency?: string;
+      provider_transaction_id?: string | null;
+    } | null = null;
+    if (supabaseAdmin) {
+      const { data: orderRow, error: orderFetchErr } = await supabaseAdmin
+        .from('orders')
+        .select('status, amount, currency, provider_transaction_id')
+        .eq('reference', cleanRef)
+        .maybeSingle();
+      if (orderFetchErr) {
+        res.status(503).json({ ok: false, temporaryError: true, error: 'Erreur temporaire lecture commande Supabase.' });
+        return;
+      }
+      dbOrder = orderRow;
+    }
+
+    const isRefund = entityStatus === 'refunded' || eventName.includes('refund');
+    const isDeclinedOrFailed =
+      entityStatus === 'declined' ||
+      entityStatus === 'failed' ||
+      entityStatus === 'refused' ||
+      eventName.includes('declined') ||
+      eventName.includes('failed') ||
+      eventName.includes('refused');
+    const isCanceledOrExpired =
+      entityStatus === 'canceled' ||
+      entityStatus === 'cancelled' ||
+      entityStatus === 'expired' ||
+      eventName.includes('cancel') ||
+      eventName.includes('expired');
+    const isPendingOrCreated =
+      entityStatus === 'pending' ||
+      entityStatus === 'processing' ||
+      eventName === 'transaction.created' ||
+      eventName === 'transaction.pending';
+
+    const isConfirmedSignal =
+      status.provider === 'fedapay'
+        ? entityStatus === 'approved' ||
+          entityStatus === 'transferred' ||
+          eventName === 'transaction.approved' ||
+          eventName === 'transaction.transferred'
+        : status.provider === 'kkiapay'
+        ? entityStatus === 'success' || eventName === 'transaction.success'
+        : entityStatus === 'accepted' || String(req.body?.cpm_result || '') === '00';
+
+    if (isRefund) {
+      if (dbOrder?.status === 'refunded' || processedTransactions.get(cleanRef)?.status === 'refunded') {
+        rememberWebhookEvent(webhookKey);
+        res.json({ ok: true, idempotent: true, status: 'refunded' });
+        return;
+      }
+      processedTransactions.set(cleanRef, {
+        status: 'refunded',
+        verifiedAt: new Date().toISOString(),
+        provider: status.provider
+      });
+      recordPaymentEvent({
+        reference: cleanRef,
+        provider: status.provider,
+        event: eventName || 'webhook',
+        status: 'refunded',
+        detail: `Webhook remboursement (${entityStatus || 'refunded'})`
+      });
+      await revokeOrderEnrollmentInSupabase(cleanRef, 'refunded', cleanTxId);
+      rememberWebhookEvent(webhookKey);
+      res.json({ ok: true, received: true, status: 'refunded' });
+      return;
+    }
+
+    const memStatus = processedTransactions.get(cleanRef)?.status;
+
+    if (isDeclinedOrFailed || isCanceledOrExpired) {
+      const mappedStatus: 'failed' | 'cancelled' = isDeclinedOrFailed ? 'failed' : 'cancelled';
+      if (
+        dbOrder?.status === 'confirmed' ||
+        dbOrder?.status === 'refunded' ||
+        memStatus === 'confirmed' ||
+        memStatus === 'refunded'
+      ) {
+        rememberWebhookEvent(webhookKey);
+        res.json({ ok: true, idempotent: true, ignored: true, status: dbOrder?.status || memStatus });
+        return;
+      }
+      const syncRes = await syncNonConfirmedOrderStatusInSupabase(cleanRef, mappedStatus, cleanTxId);
+      const alreadyMem = memStatus === mappedStatus;
+      processedTransactions.set(cleanRef, {
+        status: mappedStatus,
+        verifiedAt: new Date().toISOString(),
+        provider: status.provider
+      });
+      if (!syncRes.alreadyInState && !alreadyMem) {
         recordPaymentEvent({
           reference: cleanRef,
           provider: status.provider,
           event: eventName || 'webhook',
           status: mappedStatus,
-          detail: `Webhook reçu (${entityStatus || mappedStatus})`
+          detail: `Webhook reçu (${entityStatus || eventName || mappedStatus})`
         });
-        await revokeOrderEnrollmentInSupabase(cleanRef, mappedStatus);
-      } else {
-        if (processedTransactions.get(cleanRef)?.status === 'confirmed') {
-          res.json({ ok: true, idempotent: true });
+      }
+      rememberWebhookEvent(webhookKey);
+      res.json({ ok: true, received: true, status: mappedStatus, ...(syncRes.alreadyInState || alreadyMem ? { idempotent: true } : {}) });
+      return;
+    }
+
+    if (isPendingOrCreated) {
+      if (
+        dbOrder?.status === 'confirmed' ||
+        dbOrder?.status === 'refunded' ||
+        memStatus === 'confirmed' ||
+        memStatus === 'refunded'
+      ) {
+        rememberWebhookEvent(webhookKey);
+        res.json({ ok: true, idempotent: true, ignored: true, status: dbOrder?.status || memStatus });
+        return;
+      }
+      const syncRes = await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'pending', cleanTxId);
+      if (!syncRes.alreadyInState) {
+        recordPaymentEvent({
+          reference: cleanRef,
+          provider: status.provider,
+          event: eventName || 'webhook',
+          status: 'pending',
+          detail: `Webhook en attente (${entityStatus || eventName || 'pending'})`
+        });
+      }
+      rememberWebhookEvent(webhookKey);
+      res.json({ ok: true, received: true, pending: true, status: 'pending' });
+      return;
+    }
+
+    if (isConfirmedSignal) {
+      if (memStatus === 'confirmed' || dbOrder?.status === 'confirmed') {
+        rememberWebhookEvent(webhookKey);
+        res.json({ ok: true, idempotent: true, status: 'confirmed' });
+        return;
+      }
+      if (memStatus === 'refunded' || dbOrder?.status === 'refunded') {
+        rememberWebhookEvent(webhookKey);
+        res.json({ ok: true, idempotent: true, ignored: true, status: 'refunded' });
+        return;
+      }
+
+      let verifiedTxId = cleanTxId || dbOrder?.provider_transaction_id || undefined;
+
+      // Condition 1 & 2: When FedaPay is configured, always verify the actual transaction status via FedaPay API before confirming
+      if (status.provider === 'fedapay' && status.configured) {
+        if (!verifiedTxId) {
+          res.status(400).json({ ok: false, error: 'Identifiant de transaction FedaPay absent dans le webhook.' });
           return;
         }
+        const fedaRes = await fetchFedaPayTransaction(verifiedTxId, status.mode);
+        if (!fedaRes.ok) {
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'webhook_verify_retry',
+            status: 'pending',
+            detail: `Vérification FedaPay temporairement impossible (${fedaRes.error})`
+          });
+          res.status(503).json({
+            ok: false,
+            temporaryError: true,
+            error: `Vérification API FedaPay temporairement indisponible : ${fedaRes.error}`
+          });
+          return;
+        }
+
+        const realTx = fedaRes.tx;
+        const realStatus = String(realTx.status || '').trim().toLowerCase();
+        if (realStatus !== 'approved' && realStatus !== 'transferred') {
+          const syncedStatus: 'pending' | 'failed' | 'cancelled' =
+            realStatus === 'declined' || realStatus === 'failed'
+              ? 'failed'
+              : realStatus === 'canceled' || realStatus === 'cancelled' || realStatus === 'expired'
+              ? 'cancelled'
+              : 'pending';
+          await syncNonConfirmedOrderStatusInSupabase(cleanRef, syncedStatus, verifiedTxId);
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'webhook_status_guard',
+            status: syncedStatus,
+            detail: `Webhook bloqué : statut réel FedaPay = ${realStatus || 'inconnu'}`
+          });
+          rememberWebhookEvent(webhookKey);
+          res.json({ ok: true, received: true, verified: false, status: syncedStatus });
+          return;
+        }
+
+        const apiRef = realTx.custom_metadata?.reference;
+        if (apiRef && String(apiRef) !== cleanRef) {
+          res.status(400).json({ ok: false, error: 'Référence FedaPay API incohérente avec le webhook.' });
+          return;
+        }
+        if (
+          dbOrder &&
+          typeof dbOrder.amount === 'number' &&
+          (realTx.amount === undefined || !Number.isFinite(Number(realTx.amount)) || Number(realTx.amount) + 2 < dbOrder.amount)
+        ) {
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'webhook_amount_mismatch',
+            status: 'failed',
+            detail: `Montant FedaPay (${realTx.amount}) inférieur à la commande (${dbOrder.amount})`
+          });
+          res.status(400).json({ ok: false, error: 'Montant FedaPay incohérent avec la commande.' });
+          return;
+        }
+        if (
+          dbOrder?.currency &&
+          realTx.currency?.iso &&
+          String(realTx.currency.iso).toUpperCase() !== dbOrder.currency
+        ) {
+          res.status(400).json({ ok: false, error: 'Devise FedaPay incohérente avec la commande.' });
+          return;
+        }
+      } else {
         const rawWebhookAmount = req.body?.entity?.amount ?? req.body?.cpm_amount ?? req.body?.amount;
-        if (supabaseAdmin && rawWebhookAmount !== undefined && Number.isFinite(Number(rawWebhookAmount))) {
-          const { data: storedOrder } = await supabaseAdmin
-            .from('orders')
-            .select('amount')
-            .eq('reference', cleanRef)
-            .maybeSingle();
-          if (storedOrder && typeof storedOrder.amount === 'number' && Number(rawWebhookAmount) + 2 < storedOrder.amount) {
+        if (dbOrder && typeof dbOrder.amount === 'number' && rawWebhookAmount !== undefined && Number.isFinite(Number(rawWebhookAmount))) {
+          if (Number(rawWebhookAmount) + 2 < dbOrder.amount) {
             recordPaymentEvent({
               reference: cleanRef,
               provider: status.provider,
               event: 'webhook_amount_mismatch',
               status: 'failed',
-              detail: `Montant webhook (${rawWebhookAmount}) inférieur à la commande (${storedOrder.amount})`
+              detail: `Montant webhook (${rawWebhookAmount}) inférieur à la commande (${dbOrder.amount})`
             });
             res.status(400).json({ ok: false, error: 'Montant webhook incohérent avec la commande.' });
             return;
           }
         }
-        processedTransactions.set(cleanRef, {
-          status: 'confirmed',
-          verifiedAt: new Date().toISOString(),
-          provider: status.provider
-        });
-        recordPaymentEvent({
-          reference: cleanRef,
-          provider: status.provider,
-          event: eventName || 'webhook',
-          status: 'confirmed',
-          detail: `Webhook confirmé${txId ? ` (Tx ${txId})` : ''}`
-        });
-        await activateOrderEnrollmentInSupabase(cleanRef, txId ? String(txId) : undefined);
       }
+
+      processedTransactions.set(cleanRef, {
+        status: 'confirmed',
+        verifiedAt: new Date().toISOString(),
+        provider: status.provider
+      });
+      recordPaymentEvent({
+        reference: cleanRef,
+        provider: status.provider,
+        event: eventName || 'webhook',
+        status: 'confirmed',
+        detail: `Webhook confirmé${verifiedTxId ? ` (Tx ${verifiedTxId})` : ''}`
+      });
+      await activateOrderEnrollmentInSupabase(cleanRef, verifiedTxId);
+      rememberWebhookEvent(webhookKey);
+      res.json({ ok: true, received: true, status: 'confirmed' });
+      return;
     }
 
-    res.json({ ok: true, received: true });
+    // Any unknown event/status is safely ignored without ever confirming enrollment
+    recordPaymentEvent({
+      reference: cleanRef,
+      provider: status.provider,
+      event: eventName || 'webhook_ignored',
+      status: 'pending',
+      detail: `Événement ignoré sans déblocage (${entityStatus || eventName || 'inconnu'})`
+    });
+    rememberWebhookEvent(webhookKey);
+    res.json({ ok: true, received: true, ignored: true });
   });
 
   // 7. Admin Refund Route (protected by verified Admin token)

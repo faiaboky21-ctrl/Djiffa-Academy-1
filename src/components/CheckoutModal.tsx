@@ -179,6 +179,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         } catch {
           // ignore confetti error
         }
+      } else if (verify.finalFailure) {
+        setErrorMessage(verify.message || 'La transaction a été refusée, annulée ou a expiré.');
+        setStep('failed');
       } else {
         setErrorMessage(verify.message || 'Le paiement n’est pas encore confirmé par le prestataire.');
       }
@@ -521,12 +524,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                 )}
 
                 <div className="pt-2 border-t border-emerald-800/50 space-y-2">
+                  {pendingTxId && (
+                    <p className="text-[11px] text-zinc-300 font-mono">
+                      ID Transaction {paymentConfig.activeProvider.toUpperCase()} : {pendingTxId}
+                    </p>
+                  )}
                   {paymentConfig.activeProvider !== 'cinetpay' && (
                     <input
                       type="text"
                       value={pendingTxId}
                       onChange={(e) => setPendingTxId(e.target.value)}
-                      placeholder="ID de transaction (si demandé après validation)"
+                      placeholder="ID de transaction (prérempli automatiquement si disponible)"
                       className="w-full px-3 py-1.5 rounded bg-zinc-950 border border-zinc-700 text-[11px] text-slate-100"
                     />
                   )}
@@ -712,13 +720,18 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             )}
 
             {paymentConfig.serverConfigured && paymentConfig.isTestMode && (
-              <div className="p-3.5 rounded-xl bg-amber-950/30 border border-[#D4AF37]/40 text-[11px] text-zinc-300 space-y-1">
+              <div className="p-3.5 rounded-xl bg-amber-950/30 border border-[#D4AF37]/40 text-[11px] text-zinc-300 space-y-1.5">
                 <p className="font-semibold text-[#F3E5AB]">
                   Mode Test Sandbox actif ({paymentConfig.activeProvider.toUpperCase()})
                 </p>
                 <p className="text-zinc-400">
                   Vous effectuez un test sur l’environnement Sandbox de {paymentConfig.activeProvider.toUpperCase()}. Aucun vrai portefeuille Mobile Money ni aucune vraie carte bancaire ne sera débité.
                 </p>
+                {paymentConfig.activeProvider === 'fedapay' && (
+                  <p className="text-zinc-300">
+                    Numéros de test FedaPay Sandbox (Bénin) : utilisez <strong className="text-[#F3E5AB]">66000001</strong> (MTN MoMo succès) ou <strong className="text-[#F3E5AB]">64000001</strong> (Moov Money succès). Un vrai numéro personnel échoue en Sandbox. Utilisez <strong className="text-[#F3E5AB]">66000000</strong> / <strong className="text-[#F3E5AB]">64000000</strong> pour simuler un refus.
+                  </p>
+                )}
               </div>
             )}
 
@@ -908,7 +921,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               </p>
             </div>
             <button
-              onClick={() => setStep('details')}
+              onClick={() => {
+                setExternalPaymentUrl(null);
+                setPendingRef(null);
+                setPendingTxId('');
+                setErrorMessage('');
+                setStep('details');
+              }}
               className="py-3 px-6 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold uppercase tracking-wider cursor-pointer"
             >
               Revenir au choix du paiement

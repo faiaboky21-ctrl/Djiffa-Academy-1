@@ -25,7 +25,7 @@ import { AuthModal } from './components/AuthModal';
 import { Course } from './types';
 import { getCoursePricing } from './lib/pricing';
 import { BRAND_IMAGES } from './lib/assets';
-import { ArrowRight, ArrowLeft, Sparkles, CheckCircle, MessageSquareQuote, X, Info, Scale } from 'lucide-react';
+import { ArrowRight, ArrowLeft, Sparkles, CheckCircle, AlertCircle, MessageSquareQuote, X, Info, Scale } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -76,6 +76,8 @@ const MainAppContent: React.FC = () => {
           className={`px-4 py-3 border-b text-xs flex items-center justify-between gap-4 ${
             paymentReturnNotice.type === 'success'
               ? 'bg-emerald-950/90 border-emerald-700 text-emerald-200'
+              : paymentReturnNotice.type === 'error'
+              ? 'bg-red-950/90 border-red-700 text-red-200'
               : 'bg-amber-950/80 border-[#D4AF37]/40 text-[#F3E5AB]'
           }`}
         >
@@ -83,6 +85,8 @@ const MainAppContent: React.FC = () => {
             <div className="flex items-center gap-2.5">
               {paymentReturnNotice.type === 'success' ? (
                 <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : paymentReturnNotice.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
               ) : (
                 <Info className="w-4 h-4 text-[#D4AF37] shrink-0" />
               )}

@@ -2599,29 +2599,63 @@ async function startServer() {
 
     try {
       const [domainsRes, coursesRes, profilesRes, ordersRes, bucketsRes] = await Promise.all([
-        supabaseAdmin.from('domains').select('id', { count: 'exact', head: true }),
-        supabaseAdmin.from('courses').select('id', { count: 'exact', head: true }),
-        supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }),
-        supabaseAdmin.from('orders').select('id', { count: 'exact', head: true }),
+        supabaseAdmin.from('domains').select('id', { count: 'exact' }).limit(1),
+        supabaseAdmin.from('courses').select('id', { count: 'exact' }).limit(1),
+        supabaseAdmin.from('profiles').select('id', { count: 'exact' }).limit(1),
+        supabaseAdmin.from('orders').select('id', { count: 'exact' }).limit(1),
         supabaseAdmin.storage.listBuckets()
       ]);
 
-      const dbError = domainsRes.error || coursesRes.error || profilesRes.error || ordersRes.error;
-      if (dbError) {
+      const tableChecks = [
+        { name: 'domains', res: domainsRes },
+        { name: 'courses', res: coursesRes },
+        { name: 'profiles', res: profilesRes },
+        { name: 'orders', res: ordersRes }
+      ];
+      const failedTable = tableChecks.find((t) => Boolean(t.res.error));
+
+      if (failedTable?.res.error) {
+        const dbError = failedTable.res.error;
+        const httpStatus = failedTable.res.status;
+        const httpStatusText = failedTable.res.statusText || '';
+        const errText = [dbError.message, dbError.details, dbError.hint]
+          .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+          .join(' — ');
         const isMissingSchema =
-          /does not exist|schema cache|42P01|PGRST205/i.test(dbError.message) ||
+          /does not exist|schema cache|42P01|PGRST205/i.test(errText) ||
           dbError.code === '42P01' ||
           dbError.code === 'PGRST205';
+
+        const statusLabel = [
+          httpStatus ? `HTTP ${httpStatus}` : '',
+          httpStatusText,
+          dbError.code ? `Code ${dbError.code}` : ''
+        ]
+          .filter(Boolean)
+          .join(' · ');
+
+        const detailMessage =
+          errText ||
+          (httpStatus === 401 || httpStatus === 403
+            ? 'Authentification Supabase refusée : vérifiez que SUPABASE_SERVICE_ROLE_KEY correspond bien à la clé service_role du même projet que SUPABASE_URL.'
+            : httpStatus
+            ? `Échec de la requête sur la table « ${failedTable.name} » (${statusLabel}).`
+            : `Erreur Supabase non détaillée sur la table « ${failedTable.name} ».`);
 
         res.json({
           ok: false,
           status: isMissingSchema ? 'external_action' : 'error',
+          httpStatus: httpStatus || undefined,
+          httpStatusText: httpStatusText || undefined,
+          errorCode: dbError.code || undefined,
           message: isMissingSchema
-            ? 'Supabase joignable, mais les tables SQL sont absentes. Exécutez supabase/schema.sql dans Supabase SQL Editor.'
-            : `Erreur Supabase : ${dbError.message}`,
+            ? `Supabase joignable, mais les tables SQL sont absentes (${statusLabel || 'PGRST205'}). Exécutez supabase/schema.sql dans Supabase SQL Editor.`
+            : `Erreur Supabase${statusLabel ? ` (${statusLabel})` : ''} : ${detailMessage}`,
           tableCounts: null,
+          tables: [],
           bucketsFound: [],
-          missingBuckets: expectedBuckets
+          missingBuckets: expectedBuckets,
+          buckets: []
         });
         return;
       }
@@ -2650,10 +2684,17 @@ async function startServer() {
       }));
 
       if (bucketsRes.error) {
+        const storageErr = bucketsRes.error as { message?: string; statusCode?: string | number; status?: number };
+        const storageCode = storageErr.status ?? storageErr.statusCode;
+        const storageDetail =
+          (typeof storageErr.message === 'string' && storageErr.message.trim()) ||
+          (storageCode ? `Erreur Storage (${storageCode})` : 'Impossible de lister les buckets Supabase Storage.');
         res.json({
           ok: false,
           status: 'error',
-          message: `Tables SQL détectées, mais impossible de lister Supabase Storage : ${bucketsRes.error.message}`,
+          httpStatus: typeof storageCode === 'number' ? storageCode : undefined,
+          errorCode: storageCode !== undefined ? String(storageCode) : undefined,
+          message: `Tables SQL détectées, mais erreur Supabase Storage${storageCode ? ` (${storageCode})` : ''} : ${storageDetail}`,
           tableCounts,
           tables,
           bucketsFound: [],
@@ -2688,10 +2729,12 @@ async function startServer() {
         buckets
       });
     } catch (err) {
+      const errMsg =
+        err instanceof Error && err.message.trim() ? err.message.trim() : 'Erreur réseau lors du test Supabase.';
       res.json({
         ok: false,
         status: 'error',
-        message: err instanceof Error ? err.message : 'Erreur réseau lors du test Supabase.',
+        message: errMsg,
         tableCounts: null,
         tables: [],
         bucketsFound: [],

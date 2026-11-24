@@ -119,6 +119,9 @@ interface LaunchAuditResponse {
 interface SupabaseVerifyResult {
   ok: boolean;
   status: LaunchStepStatus;
+  httpStatus?: number;
+  httpStatusText?: string;
+  errorCode?: string;
   message: string;
   tableCounts: { domains: number; courses: number; profiles: number; orders: number } | null;
   tables?: Array<{ name: string; ok: boolean; count: number }>;
@@ -330,18 +333,32 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
         });
         return;
       }
-      if (!res.ok && parsed.error) {
+      const rawMessage = typeof parsed.message === 'string' ? parsed.message.trim() : '';
+      const rawError = typeof parsed.error === 'string' ? parsed.error.trim() : '';
+      if (!res.ok && rawError) {
         setSupaCheck({
           ok: false,
           status: 'error',
-          message: `${parsed.error} (HTTP ${res.status})`,
+          httpStatus: res.status,
+          httpStatusText: res.statusText || undefined,
+          message: `${rawError} (HTTP ${res.status})`,
           tableCounts: null,
           bucketsFound: [],
           missingBuckets: ['brand-assets', 'course-pdfs', 'course-videos']
         });
         return;
       }
-      setSupaCheck(parsed as SupabaseVerifyResult);
+      const safeMessage =
+        rawMessage && !/^Erreur Supabase\s*:?\s*$/i.test(rawMessage)
+          ? rawMessage
+          : rawError ||
+            `Erreur lors de la vérification Supabase (HTTP ${parsed.httpStatus || res.status || '?'}${
+              parsed.httpStatusText || res.statusText ? ` ${parsed.httpStatusText || res.statusText}` : ''
+            }).`;
+      setSupaCheck({
+        ...(parsed as SupabaseVerifyResult),
+        message: safeMessage
+      });
     } catch (err) {
       let healthNote = '';
       try {
@@ -970,7 +987,20 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
                     : 'bg-amber-950/40 border-amber-800 text-[#F3E5AB]'
                 }`}
               >
-                <p className="font-semibold">{supaCheck.message}</p>
+                <p className="font-semibold">
+                  {supaCheck.message?.trim() || 'Erreur Supabase inconnue (aucun détail renvoyé par le serveur).'}
+                </p>
+                {!supaCheck.ok && (supaCheck.httpStatus || supaCheck.errorCode) && (
+                  <p className="text-[11px] opacity-85 font-mono">
+                    {[
+                      supaCheck.httpStatus ? `Statut HTTP : ${supaCheck.httpStatus}` : '',
+                      supaCheck.httpStatusText || '',
+                      supaCheck.errorCode ? `Code : ${supaCheck.errorCode}` : ''
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                )}
                 {supaCheck.tables && supaCheck.tables.length > 0 && (
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px]">
                     {supaCheck.tables.map((t) => (

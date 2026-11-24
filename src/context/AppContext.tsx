@@ -21,7 +21,9 @@ import {
   SiteSettings,
   CoachingProgramConfig,
   Testimonial,
-  NotificationItem
+  NotificationItem,
+  ContactMessage,
+  PaymentEventLog
 } from '../types';
 import {
   INITIAL_COURSES,
@@ -32,6 +34,7 @@ import {
 } from '../data/coursesData';
 import { supabase, isSupabaseConfigured, getSupabaseAccessToken } from '../lib/supabase';
 import { migrateCatalogToSupabaseServer, migrateStudentProgressToSupabase } from '../lib/migration';
+import { getCoursePricing } from '../lib/pricing';
 
 export type AppView =
   | 'home'
@@ -42,7 +45,9 @@ export type AppView =
   | 'admin-space'
   | 'coaching'
   | 'about'
-  | 'contact';
+  | 'contact'
+  | 'legal-cgv'
+  | 'legal-mentions';
 
 export interface InfrastructureStatus {
   supabase: {
@@ -61,6 +66,7 @@ export interface InfrastructureStatus {
   adminSecurity: {
     email: string;
     customCodeConfigured: boolean;
+    isProductionMode?: boolean;
   };
   environment: string;
 }
@@ -82,6 +88,8 @@ interface AppContextType {
   language: Language;
   orders: Order[];
   coachingRequests: CoachingRequest[];
+  contactMessages: ContactMessage[];
+  paymentEvents: PaymentEventLog[];
   paymentConfig: PaymentGatewayConfig;
   infraStatus: InfrastructureStatus | null;
   adminToken: string | null;
@@ -137,17 +145,25 @@ interface AppContextType {
     paymentMethod: PaymentMethod,
     phoneOrCard: string,
     options?: { promoCode?: string; discountPercent?: number; isDemoMode?: boolean; transactionId?: string; reference?: string }
-  ) => Promise<{ success: boolean; order: Order; message?: string }>;
+  ) => Promise<{ success: boolean; isDemoRecorded?: boolean; order: Order; message?: string }>;
   verifyExistingPayment: (reference: string, transactionId?: string, courseId?: string) => Promise<{ ok: boolean; verified: boolean; message?: string }>;
   refreshServerPaymentStatus: () => Promise<void>;
 
-  // Coaching
+  // Coaching & Contact
   submitCoachingRequest: (
     data: Omit<CoachingRequest, 'id' | 'createdAt' | 'status' | 'userId' | 'userName' | 'userEmail'> & {
       userName?: string;
       userEmail?: string;
     }
   ) => CoachingRequest;
+  submitContactMessage: (data: {
+    name: string;
+    email: string;
+    phone?: string;
+    subject: string;
+    message: string;
+  }) => Promise<ContactMessage>;
+  updateContactMessageStatus: (id: string, status: ContactMessage['status'], adminNotes?: string) => void;
 
   // Notifications
   markNotificationRead: (id: string) => void;
@@ -156,6 +172,7 @@ interface AppContextType {
   syncCurrentStudentToCloud: () => Promise<{ ok: boolean; message: string }>;
   migrateLocalCatalogToCloud: () => Promise<{ ok: boolean; message: string; counts?: Record<string, number> }>;
   refreshSupabaseAdminData: () => Promise<void>;
+  refreshAdminTelemetry: () => Promise<void>;
 
   // Admin Operations
   saveCourse: (course: Course) => void;
@@ -170,7 +187,7 @@ interface AppContextType {
   updateSiteSettings: (settings: SiteSettings) => void;
   updateOrderStatus: (orderId: string, status: Order['status']) => void;
   refundOrderServer: (orderId: string) => Promise<{ ok: boolean; message?: string }>;
-  updateCoachingStatus: (id: string, status: CoachingRequest['status'], meetingLink?: string) => void;
+  updateCoachingStatus: (id: string, status: CoachingRequest['status'], meetingLink?: string, adminNotes?: string) => void;
   updatePaymentConfig: (config: PaymentGatewayConfig) => void;
   grantManualCourseAccess: (userId: string, courseId: string) => void;
   revokeCourseAccess: (userId: string, courseId: string) => void;
@@ -342,7 +359,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(() => {
     const saved = localStorage.getItem('djiffa_site_settings');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+      try {
+        return { ...INITIAL_SITE_SETTINGS, ...JSON.parse(saved) };
+      } catch (e) {
+        console.error(e);
+      }
     }
     return INITIAL_SITE_SETTINGS;
   });
@@ -435,6 +456,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     ];
   });
+
+  const [contactMessages, setContactMessages] = useState<ContactMessage[]>(() => {
+    const saved = localStorage.getItem('djiffa_contact_messages');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+    }
+    return [];
+  });
+
+  const [paymentEvents, setPaymentEvents] = useState<PaymentEventLog[]>([]);
 
   const [paymentConfig, setPaymentConfig] = useState<PaymentGatewayConfig>(DEFAULT_PAYMENT_CONFIG);
 
@@ -536,6 +567,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             priceEUR: c.price_eur,
             priceUSD: c.price_usd,
             originalPriceXOF: c.original_price_xof || undefined,
+            promoActive: Boolean(c.promo_active),
+            promoPriceXOF: c.promo_price_xof || undefined,
+            promoPriceEUR: c.promo_price_eur || undefined,
+            promoPriceUSD: c.promo_price_usd || undefined,
             coverImage: c.cover_image,
             isFeatured: Boolean(c.is_featured),
             isPublished: Boolean(c.is_published),
@@ -592,11 +627,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (settingsRow) {
         setSiteSettings((prev) => ({
+          ...INITIAL_SITE_SETTINGS,
           ...prev,
           agencyLogoDataUrl: settingsRow.agency_logo_url ?? prev.agencyLogoDataUrl,
+          academyName: settingsRow.academy_name || prev.academyName,
+          parentAgencyName: settingsRow.parent_agency_name || prev.parentAgencyName,
+          directorName: settingsRow.director_name || prev.directorName,
+          academyPresentation: settingsRow.academy_presentation || prev.academyPresentation,
+          parentAgencyPresentation: settingsRow.parent_agency_presentation || prev.parentAgencyPresentation,
+          directorBio: settingsRow.director_bio || prev.directorBio,
           contactEmail: settingsRow.contact_email || prev.contactEmail,
           contactPhone: settingsRow.contact_phone || prev.contactPhone,
-          headquarters: settingsRow.headquarters || prev.headquarters
+          whatsappNumber: settingsRow.whatsapp_number || prev.whatsappNumber,
+          headquarters: settingsRow.headquarters || prev.headquarters,
+          supportHours: settingsRow.support_hours || prev.supportHours,
+          instagramUrl: settingsRow.instagram_url || prev.instagramUrl,
+          linkedinUrl: settingsRow.linkedin_url || prev.linkedinUrl,
+          youtubeUrl: settingsRow.youtube_url || prev.youtubeUrl,
+          legalNotices: settingsRow.legal_notices || prev.legalNotices,
+          termsOfSale: settingsRow.terms_of_sale || prev.termsOfSale
         }));
       }
     } catch (err) {
@@ -706,6 +755,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               preferredDate: r.preferred_date,
               status: r.status,
               meetingLink: r.meeting_link || undefined,
+              adminNotes: r.admin_notes || undefined,
               createdAt: r.created_at
             }))
           );
@@ -863,6 +913,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             preferredDate: r.preferred_date,
             status: r.status,
             meetingLink: r.meeting_link || undefined,
+            adminNotes: r.admin_notes || undefined,
             createdAt: r.created_at
           }))
         );
@@ -871,6 +922,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('Admin Supabase load warning:', err);
     }
   }, [adminToken, infraStatus?.supabase.serverConnected]);
+
+  const refreshAdminTelemetry = useCallback(async () => {
+    const supabaseToken = await getSupabaseAccessToken();
+    if (!adminToken && !supabaseToken) return;
+    const headers: Record<string, string> = {};
+    if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+    if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
+
+    try {
+      const [eventsRes, msgRes] = await Promise.all([
+        fetch('/api/admin/payment-events', { headers }),
+        fetch('/api/admin/contact-messages', { headers })
+      ]);
+
+      if (eventsRes.ok) {
+        const eventsData = await eventsRes.json();
+        if (eventsData.ok && Array.isArray(eventsData.events)) {
+          setPaymentEvents(eventsData.events);
+        }
+      }
+
+      if (msgRes.ok) {
+        const msgData = await msgRes.json();
+        if (msgData.ok && Array.isArray(msgData.messages)) {
+          const serverMsgs: ContactMessage[] = msgData.messages.map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            email: m.email,
+            phone: m.phone || undefined,
+            subject: m.subject,
+            message: m.message,
+            status: m.status || 'new',
+            adminNotes: m.adminNotes || m.admin_notes || undefined,
+            createdAt: m.createdAt || m.created_at || new Date().toISOString()
+          }));
+          setContactMessages((prev) => {
+            const seen = new Set(serverMsgs.map((m) => m.id));
+            const merged = [...serverMsgs, ...prev.filter((p) => !seen.has(p.id))];
+            return merged.sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Admin telemetry refresh warning:', err);
+    }
+  }, [adminToken]);
 
   const verifyExistingPayment = useCallback(
     async (reference: string, transactionId?: string, courseId?: string) => {
@@ -981,6 +1080,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => { localStorage.setItem('djiffa_students', JSON.stringify(students)); }, [students]);
   useEffect(() => { localStorage.setItem('djiffa_orders', JSON.stringify(orders)); }, [orders]);
   useEffect(() => { localStorage.setItem('djiffa_coaching', JSON.stringify(coachingRequests)); }, [coachingRequests]);
+  useEffect(() => { localStorage.setItem('djiffa_contact_messages', JSON.stringify(contactMessages)); }, [contactMessages]);
   useEffect(() => { localStorage.setItem('djiffa_notifications', JSON.stringify(notifications)); }, [notifications]);
   const clearAdminSessionStorage = useCallback(() => {
     try {
@@ -1499,14 +1599,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     paymentMethod: PaymentMethod,
     phoneOrCard: string,
     options?: { promoCode?: string; discountPercent?: number; isDemoMode?: boolean; transactionId?: string; reference?: string }
-  ): Promise<{ success: boolean; order: Order; message?: string }> => {
+  ): Promise<{ success: boolean; isDemoRecorded?: boolean; order: Order; message?: string }> => {
     const course = courses.find((c) => c.id === courseId);
     if (!course) throw new Error('Formation introuvable');
     if (!currentUser) throw new Error('Veuillez vous connecter ou créer un compte avant de finaliser l’achat.');
 
     const discountMultiplier = 1 - ((options?.discountPercent || 0) / 100);
+    const pricing = getCoursePricing(course);
     const baseAmount =
-      currency === 'EUR' ? course.priceEUR : currency === 'USD' ? course.priceUSD : course.priceXOF;
+      currency === 'EUR' ? pricing.activeEUR : currency === 'USD' ? pricing.activeUSD : pricing.activeXOF;
     const finalAmount = Math.max(0, Math.round(baseAmount * discountMultiplier));
 
     const isDemo = options?.isDemoMode ?? !paymentConfig.serverConfigured;
@@ -1519,8 +1620,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     else if (paymentMethod === 'cinetpay' || paymentConfig.activeProvider === 'cinetpay') provider = 'CinetPay';
     else if (paymentMethod.startsWith('card') && !paymentConfig.serverConfigured) provider = 'Stripe/Cartes';
 
-    // Real server-side verification when gateway is configured
-    if (!isDemo && paymentConfig.serverConfigured) {
+    // Strict Payment Rule: Never unlock a paid course on the basis of a simulated/unverified demo payment
+    if (isDemo && finalAmount > 0) {
+      const demoOrder: Order = {
+        id: `ord-${Date.now()}`,
+        reference: orderRef,
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userEmail: currentUser.email,
+        courseId: course.id,
+        courseTitle: course.title,
+        amount: finalAmount,
+        currency,
+        paymentMethod,
+        paymentProvider: provider,
+        status: 'pending',
+        isDemoTransaction: true,
+        promoCodeUsed: options?.promoCode,
+        customerPhone: phoneOrCard,
+        createdAt: new Date().toISOString()
+      };
+      setOrders((prev) => [demoOrder, ...prev]);
+      pushNotification(
+        currentUser.id,
+        'Commande de test enregistrée (Démo)',
+        `Référence ${orderRef} enregistrée en mode démonstration. Aucun débit réel ni déblocage automatique sans paiement vérifié.`,
+        'purchase'
+      );
+      return {
+        success: false,
+        isDemoRecorded: true,
+        order: demoOrder,
+        message:
+          'Commande de test enregistrée (Mode Démonstration). L’accès à cette formation payante reste verrouillé tant qu’un paiement réel n’a pas été vérifié ou validé par la Direction.'
+      };
+    }
+
+    // Real server-side verification when gateway is configured (for paid courses)
+    if (finalAmount > 0 && paymentConfig.serverConfigured) {
       const verifyRes = await fetch('/api/payments/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1570,7 +1707,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       paymentProvider: provider,
       providerTransactionId: options?.transactionId,
       status: 'confirmed',
-      isDemoTransaction: isDemo,
+      isDemoTransaction: false,
       promoCodeUsed: options?.promoCode,
       customerPhone: phoneOrCard,
       createdAt: new Date().toISOString(),
@@ -1591,7 +1728,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     pushNotification(
       currentUser.id,
-      isDemo ? 'Accès Démo Débloqué' : 'Paiement Confirmé',
+      'Paiement Confirmé',
       `Votre accès à « ${course.title} » est actif (Réf : ${orderRef}).`,
       'purchase'
     );
@@ -1627,23 +1764,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setCoachingRequests((prev) => [newReq, ...prev]);
 
-    if (isSupabaseConfigured && supabase) {
-      supabase
-        .from('coaching_requests')
-        .insert({
-          id: newReq.id,
-          user_id: isUuid(user.id) ? user.id : null,
-          user_name: newReq.userName,
-          user_email: newReq.userEmail,
-          user_phone: newReq.userPhone,
-          type: newReq.type,
-          program_title: newReq.programTitle,
-          need_description: newReq.needDescription,
-          preferred_date: newReq.preferredDate,
-          status: 'pending'
-        })
-        .then();
-    }
+    fetch('/api/public/coaching-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newReq)
+    }).catch(() => undefined);
 
     pushNotification(
       user.id,
@@ -1652,6 +1777,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'coaching'
     );
     return newReq;
+  };
+
+  const submitContactMessage = async (data: {
+    name: string;
+    email: string;
+    phone?: string;
+    subject: string;
+    message: string;
+  }): Promise<ContactMessage> => {
+    const item: ContactMessage = {
+      id: `msg-${Date.now()}`,
+      name: data.name.trim(),
+      email: data.email.trim(),
+      phone: data.phone?.trim() || undefined,
+      subject: data.subject.trim(),
+      message: data.message.trim(),
+      status: 'new',
+      createdAt: new Date().toISOString()
+    };
+
+    setContactMessages((prev) => [item, ...prev]);
+
+    try {
+      await fetch('/api/public/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item)
+      });
+    } catch {
+      // local state already preserved
+    }
+
+    return item;
+  };
+
+  const updateContactMessageStatus = (id: string, status: ContactMessage['status'], adminNotes?: string) => {
+    setContactMessages((prev) =>
+      prev.map((m) =>
+        m.id === id ? { ...m, status, adminNotes: adminNotes !== undefined ? adminNotes : m.adminNotes } : m
+      )
+    );
+    if (adminToken) {
+      fetch(`/api/admin/contact-messages/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`
+        },
+        body: JSON.stringify({ status, adminNotes })
+      }).catch(() => undefined);
+    }
   };
 
   // Cloud Migration & Student Sync
@@ -1866,15 +2042,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updateCoachingStatus = (id: string, status: CoachingRequest['status'], meetingLink?: string) => {
+  const updateCoachingStatus = (
+    id: string,
+    status: CoachingRequest['status'],
+    meetingLink?: string,
+    adminNotes?: string
+  ) => {
     const target = coachingRequests.find((r) => r.id === id);
     setCoachingRequests((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, status, meetingLink: meetingLink !== undefined ? meetingLink : r.meetingLink } : r))
+      prev.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              status,
+              meetingLink: meetingLink !== undefined ? meetingLink : r.meetingLink,
+              adminNotes: adminNotes !== undefined ? adminNotes : r.adminNotes
+            }
+          : r
+      )
     );
     dispatchAdminSync('update_coaching_status', {
       id,
       status,
-      meetingLink: meetingLink !== undefined ? meetingLink : target?.meetingLink
+      meetingLink: meetingLink !== undefined ? meetingLink : target?.meetingLink,
+      adminNotes: adminNotes !== undefined ? adminNotes : target?.adminNotes
     });
   };
 
@@ -1928,6 +2119,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         language,
         orders,
         coachingRequests,
+        contactMessages,
+        paymentEvents,
         paymentConfig,
         infraStatus,
         adminToken,
@@ -1968,10 +2161,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         verifyExistingPayment,
         refreshServerPaymentStatus,
         submitCoachingRequest,
+        submitContactMessage,
+        updateContactMessageStatus,
         markNotificationRead,
         syncCurrentStudentToCloud,
         migrateLocalCatalogToCloud,
         refreshSupabaseAdminData,
+        refreshAdminTelemetry,
         saveCourse,
         deleteCourse,
         saveDomain,

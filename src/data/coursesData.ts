@@ -697,11 +697,26 @@ export const INITIAL_PROMO_CODES: PromoCode[] = [
 
 export const INITIAL_SITE_SETTINGS: SiteSettings = {
   agencyLogoDataUrl: null,
+  academyName: 'DJIFFA ACADEMY',
+  parentAgencyName: 'DJIFFA DESIGN AGENCY',
+  directorName: 'Faith Ariola',
+  academyPresentation:
+    'DJIFFA ACADEMY forme les créateurs, entrepreneurs et professionnels en Afrique et à l’international. Transformez des concepts audacieux en spots publicitaires cinématographiques, collections de mode virtuelles et opportunités professionnelles hautement rémunératrices.',
+  parentAgencyPresentation:
+    'Maison mère fondée par Faith Ariola à Cotonou, DJIFFA DESIGN AGENCY est un studio de création visuelle et de stratégie digitale spécialisé dans les campagnes publicitaires, le luxe et l’intelligence artificielle appliquée aux marques.',
+  directorBio:
+    'Directrice de création et entrepreneure visionnaire, Faith Ariola a fondé DJIFFA DESIGN AGENCY avec une ambition limpide : positionner l’Afrique au premier rang de la révolution des industries créatives assistées par l’intelligence artificielle. Elle accompagne des marques de prestige, des stylistes et des créateurs vers l’excellence visuelle et l’indépendance financière.',
   contactEmail: 'universdjiffaariola@gmail.com',
   contactPhone: '+229 97 00 00 00',
+  whatsappNumber: '+229 97 00 00 00',
   headquarters: 'Cotonou, République du Bénin',
+  supportHours: 'Lundi – Vendredi : 08h30 – 19h00 (GMT+1) · Samedi : 09h00 – 14h00',
   instagramUrl: 'https://instagram.com',
   linkedinUrl: 'https://linkedin.com',
-  youtubeUrl: 'https://youtube.com'
+  youtubeUrl: 'https://youtube.com',
+  legalNotices:
+    'Éditeur du site : DJIFFA ACADEMY, pôle formation de DJIFFA DESIGN AGENCY.\nDirectrice de publication : Faith Ariola.\nSiège social : Cotonou, République du Bénin.\nContact officiel : universdjiffaariola@gmail.com.\nPropriété intellectuelle : L’ensemble des formations, vidéos, prompts, supports PDF et visuels publiés sur DJIFFA ACADEMY sont protégés par les lois relatives à la propriété intellectuelle. Toute reproduction ou diffusion non autorisée est strictement interdite.',
+  termsOfSale:
+    '1. Objet : Les présentes Conditions Générales de Vente régissent l’achat individuel des formations certifiantes et programmes d’accompagnement sur DJIFFA ACADEMY.\n2. Tarifs & Monnaies : Les prix sont exprimés principalement en FCFA (XOF), avec équivalents indicatifs en EUR et USD. Aucun abonnement mensuel automatique n’est appliqué.\n3. Paiement & Activation : Les paiements sont traités via nos prestataires sécurisés (MTN Mobile Money, Moov Money, Visa, Mastercard via FedaPay / KKiaPay / CinetPay). L’accès aux contenus numériques est activé uniquement après confirmation réelle de la transaction par le prestataire.\n4. Accès personnel : L’accès est strictement personnel et nominatif.\n5. Assistance : Toute réclamation ou demande d’accompagnement s’effectue via l’adresse email officielle de la Direction.'
 };
 

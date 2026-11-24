@@ -8,7 +8,7 @@ import { useApp } from '../context/AppContext';
 import { ArrowRight, Sparkles, Award, ShieldCheck, PlayCircle } from 'lucide-react';
 
 export const Hero: React.FC = () => {
-  const { navigateTo } = useApp();
+  const { navigateTo, siteSettings } = useApp();
 
   return (
     <section className="relative overflow-hidden pt-8 pb-16 lg:pt-16 lg:pb-24 border-b border-zinc-800/60">
@@ -20,9 +20,9 @@ export const Hero: React.FC = () => {
         {/* Top Agency Kicker */}
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/90 border border-[#D4AF37]/30 text-xs text-zinc-300 mb-8 backdrop-blur-sm">
           <span className="w-2 h-2 rounded-full bg-[#D4AF37]" />
-          <span className="font-medium text-[#F3E5AB]">DJIFFA DESIGN AGENCY</span>
+          <span className="font-medium text-[#F3E5AB]">{siteSettings.parentAgencyName}</span>
           <span className="text-zinc-500">·</span>
-          <span>Fondée par Faith Ariola</span>
+          <span>Fondée par {siteSettings.directorName}</span>
         </div>
 
         {/* 2-Column Split: Editorial Value Proposition & Cinematic Portrait */}
@@ -35,7 +35,7 @@ export const Hero: React.FC = () => {
             </h1>
 
             <p className="text-base sm:text-lg text-zinc-300 leading-relaxed max-w-2xl text-pretty">
-              DJIFFA ACADEMY forme les créateurs, entrepreneurs et professionnels en Afrique et à l’international. Transformez des concepts audacieux en spots publicitaires cinématographiques, collections de mode virtuelles et opportunités professionnelles hautement rémunératrices.
+              {siteSettings.academyPresentation}
             </p>
 
             {/* Mode of Learning highlights (Unboxed discipline) */}
@@ -104,10 +104,10 @@ export const Hero: React.FC = () => {
                     Direction & Vision
                   </span>
                   <p className="font-brand text-lg font-bold text-white tracking-wide">
-                    Faith Ariola
+                    {siteSettings.directorName}
                   </p>
                   <p className="text-xs text-zinc-300 mt-0.5">
-                    Fondatrice de DJIFFA DESIGN AGENCY & Directrice de DJIFFA ACADEMY
+                    Fondatrice de {siteSettings.parentAgencyName} & Directrice de {siteSettings.academyName}
                   </p>
                 </div>
               </div>

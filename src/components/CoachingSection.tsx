@@ -21,7 +21,8 @@ export const CoachingSection: React.FC = () => {
     currentUser,
     submitCoachingRequest,
     navigateTo,
-    coachingPrograms
+    coachingPrograms,
+    siteSettings
   } = useApp();
 
   const [selectedProgramType, setSelectedProgramType] = useState<'individual' | 'collective'>('individual');
@@ -72,7 +73,7 @@ export const CoachingSection: React.FC = () => {
         <div className="text-center max-w-3xl mx-auto space-y-4">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900 border border-[#D4AF37]/30 text-xs text-[#F3E5AB]">
             <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
-            <span>Accompagnement Sur-Mesure DJIFFA ACADEMY</span>
+            <span>Accompagnement Sur-Mesure {siteSettings.academyName}</span>
           </div>
 
           <h1 className="font-brand text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-100">
@@ -80,7 +81,7 @@ export const CoachingSection: React.FC = () => {
           </h1>
 
           <p className="text-sm sm:text-base text-zinc-400">
-            Bénéficiez des retours directs, de l’expertise technique et de la direction stratégique de Faith Ariola et des experts de DJIFFA DESIGN AGENCY.
+            Bénéficiez des retours directs, de l’expertise technique et de la direction stratégique de {siteSettings.directorName} et des experts de {siteSettings.parentAgencyName}.
           </p>
         </div>
 
@@ -259,7 +260,7 @@ export const CoachingSection: React.FC = () => {
               <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-[#D4AF37] shrink-0" />
                 <span>
-                  Les rendez-vous ne sont confirmés qu'après validation effective par Faith Ariola afin de garantir un engagement mutuel de haute qualité.
+                  Les rendez-vous ne sont confirmés qu'après validation effective par {siteSettings.directorName} afin de garantir un engagement mutuel de haute qualité.
                 </span>
               </div>
 
@@ -280,7 +281,7 @@ export const CoachingSection: React.FC = () => {
                 Demande Reçue avec Succès !
               </h3>
               <p className="text-xs text-zinc-300 max-w-md mx-auto">
-                Merci {userName}. Faith Ariola et l'équipe pédagogique étudient votre dossier. Vous recevrez une réponse personnalisée par email et WhatsApp pour confirmer votre créneau.
+                Merci {userName}. {siteSettings.directorName} et l'équipe pédagogique étudient votre dossier. Vous recevrez une réponse personnalisée par email et WhatsApp pour confirmer votre créneau.
               </p>
               <div className="pt-2">
                 <button

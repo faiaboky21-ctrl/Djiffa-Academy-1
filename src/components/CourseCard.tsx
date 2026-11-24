@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { Course } from '../types';
 import { useApp } from '../context/AppContext';
+import { getCoursePricing } from '../lib/pricing';
 import { Clock, BookOpen, CheckCircle, ArrowRight, Video } from 'lucide-react';
 
 interface CourseCardProps {
@@ -19,6 +20,7 @@ export const CourseCard: React.FC<CourseCardProps> = ({ course, onOpenCheckout }
 
   const enrolled = isEnrolled(course.id);
   const progress = getCourseProgress(course.id);
+  const pricing = getCoursePricing(course);
 
   const domainMatch = domains.find((d) => d.id === course.domain);
   const domainLabel = domainMatch ? domainMatch.shortLabel : course.domain;
@@ -93,15 +95,15 @@ export const CourseCard: React.FC<CourseCardProps> = ({ course, onOpenCheckout }
           
           <div className="flex flex-col">
             <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-medium">
-              Tarif unique
+              {pricing.isPromo && pricing.discountPercent ? `Offre spéciale · -${pricing.discountPercent}%` : 'Tarif unique'}
             </span>
             <div className="flex items-baseline gap-2">
               <span className="font-brand text-lg sm:text-xl font-bold text-[#D4AF37] tabular-nums">
-                {formatPrice(course.priceXOF)}
+                {formatPrice(pricing.activeXOF)}
               </span>
-              {course.originalPriceXOF && (
+              {pricing.crossedOutXOF && (
                 <span className="text-xs text-zinc-500 line-through tabular-nums">
-                  {formatPrice(course.originalPriceXOF)}
+                  {formatPrice(pricing.crossedOutXOF)}
                 </span>
               )}
             </div>

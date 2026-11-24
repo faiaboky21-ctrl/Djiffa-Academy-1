@@ -84,6 +84,10 @@ export interface Course {
   priceEUR: number;
   priceUSD: number;
   originalPriceXOF?: number;
+  promoActive?: boolean;
+  promoPriceXOF?: number;
+  promoPriceEUR?: number;
+  promoPriceUSD?: number;
   coverImage: string;
   objectives: string[];
   skillsAcquired: string[];
@@ -226,14 +230,46 @@ export interface NotificationItem {
   createdAt: string;
 }
 
+export interface ContactMessage {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string;
+  subject: string;
+  message: string;
+  status: 'new' | 'read' | 'replied';
+  adminNotes?: string;
+  createdAt: string;
+}
+
+export interface PaymentEventLog {
+  id: string;
+  reference: string;
+  provider: string;
+  event: string;
+  status: string;
+  detail: string;
+  receivedAt: string;
+}
+
 export interface SiteSettings {
   agencyLogoDataUrl: string | null;
+  academyName: string;
+  parentAgencyName: string;
+  directorName: string;
+  academyPresentation: string;
+  parentAgencyPresentation: string;
+  directorBio: string;
   contactEmail: string;
   contactPhone: string;
+  whatsappNumber: string;
   headquarters: string;
+  supportHours: string;
   instagramUrl: string;
   linkedinUrl: string;
   youtubeUrl: string;
+  legalNotices: string;
+  termsOfSale: string;
 }
 
 export interface PaymentGatewayConfig {

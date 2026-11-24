@@ -40,7 +40,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     getCourseProgress,
     updateUserProfile,
     syncCurrentStudentToCloud,
-    openAuthModal
+    openAuthModal,
+    siteSettings
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
@@ -187,7 +188,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
             </div>
             <div>
               <span className="text-[11px] uppercase tracking-wider text-[#D4AF37] font-semibold">
-                Espace Personnel Apprenant · DJIFFA ACADEMY
+                Espace Personnel Apprenant · {siteSettings.academyName}
               </span>
               <h1 className="font-brand text-2xl sm:text-3xl font-bold text-slate-100">
                 Bienvenue, {currentUser.name}
@@ -651,8 +652,22 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                             {ord.amount.toLocaleString('fr-FR')} {ord.currency}
                           </td>
                           <td className="p-4">
-                            <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800 uppercase">
-                              {ord.status}
+                            <span
+                              className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${
+                                ord.status === 'confirmed'
+                                  ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                                  : ord.status === 'pending' || ord.status === 'processing'
+                                  ? 'bg-amber-950 text-amber-300 border-amber-700'
+                                  : 'bg-red-950 text-red-400 border-red-800'
+                              }`}
+                            >
+                              {ord.status === 'confirmed'
+                                ? 'Confirmé (Payé)'
+                                : ord.status === 'pending'
+                                ? 'En attente'
+                                : ord.status === 'processing'
+                                ? 'En cours'
+                                : ord.status}
                             </span>
                           </td>
                           <td className="p-4">

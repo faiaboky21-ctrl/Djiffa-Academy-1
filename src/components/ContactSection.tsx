@@ -8,17 +8,25 @@ import { useApp } from '../context/AppContext';
 import { Mail, MapPin, Send, MessageCircle, Clock, CheckCircle } from 'lucide-react';
 
 export const ContactSection: React.FC = () => {
-  const { siteSettings } = useApp();
+  const { siteSettings, submitContactMessage } = useApp();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [subject, setSubject] = useState('Renseignements Formation');
   const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
   const [sentSuccess, setSentSuccess] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name || !email || !message) return;
-    setSentSuccess(true);
+    if (!name.trim() || !email.trim() || !message.trim()) return;
+    setSending(true);
+    try {
+      await submitContactMessage({ name, email, phone: phone || undefined, subject, message });
+      setSentSuccess(true);
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -48,10 +56,10 @@ export const ContactSection: React.FC = () => {
                   Maison Mère
                 </span>
                 <h3 className="font-brand text-lg font-bold text-slate-100">
-                  DJIFFA DESIGN AGENCY
+                  {siteSettings.parentAgencyName}
                 </h3>
                 <p className="text-xs text-zinc-400">
-                  Pôle Formation & Éducation Numérique
+                  {siteSettings.academyName} · Pôle Formation & Éducation Numérique
                 </p>
               </div>
 
@@ -83,8 +91,11 @@ export const ContactSection: React.FC = () => {
                     <MessageCircle className="w-4 h-4" />
                   </div>
                   <div>
-                    <strong className="text-slate-200 block">WhatsApp Direction & Support</strong>
+                    <strong className="text-slate-200 block">Téléphone & WhatsApp Direction</strong>
                     <span>{siteSettings.contactPhone}</span>
+                    {siteSettings.whatsappNumber && siteSettings.whatsappNumber !== siteSettings.contactPhone && (
+                      <span className="block text-[#F3E5AB] text-[11px]">WhatsApp : {siteSettings.whatsappNumber}</span>
+                    )}
                     <span className="text-zinc-500 block text-[11px]">Assistance inscription & paiement</span>
                   </div>
                 </div>
@@ -95,8 +106,7 @@ export const ContactSection: React.FC = () => {
                   </div>
                   <div>
                     <strong className="text-slate-200 block">Horaires de Permanence</strong>
-                    <span className="block">Lundi – Vendredi : 08h30 – 19h00 (GMT+1)</span>
-                    <span className="block">Samedi : 09h00 – 14h00</span>
+                    <span className="block">{siteSettings.supportHours}</span>
                   </div>
                 </div>
               </div>
@@ -139,19 +149,31 @@ export const ContactSection: React.FC = () => {
                     </div>
                   </div>
 
-                  <div>
-                    <label className="text-zinc-400 block mb-1">Objet de votre demande</label>
-                    <select
-                      value={subject}
-                      onChange={(e) => setSubject(e.target.value)}
-                      className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
-                    >
-                      <option value="Renseignements Formation">Renseignements sur une formation</option>
-                      <option value="Accompagnement VIP">Accompagnement VIP avec Faith Ariola</option>
-                      <option value="Paiement Mobile Money">Question sur le paiement Mobile Money</option>
-                      <option value="Partenariat Marque">Partenariat marque / Formation entreprise</option>
-                      <option value="Autre">Autre demande</option>
-                    </select>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Téléphone / WhatsApp (optionnel)</label>
+                      <input
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="+229 97 00 00 00"
+                        className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Objet de votre demande</label>
+                      <select
+                        value={subject}
+                        onChange={(e) => setSubject(e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                      >
+                        <option value="Renseignements Formation">Renseignements sur une formation</option>
+                        <option value="Accompagnement VIP">Accompagnement VIP avec {siteSettings.directorName}</option>
+                        <option value="Paiement Mobile Money">Question sur le paiement Mobile Money</option>
+                        <option value="Partenariat Marque">Partenariat marque / Formation entreprise</option>
+                        <option value="Autre">Autre demande</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div>
@@ -168,10 +190,11 @@ export const ContactSection: React.FC = () => {
 
                   <button
                     type="submit"
-                    className="w-full py-3.5 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                    disabled={sending}
+                    className="w-full py-3.5 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                   >
                     <Send className="w-4 h-4" />
-                    <span>Envoyer mon message</span>
+                    <span>{sending ? 'Transmission en cours...' : 'Envoyer mon message'}</span>
                   </button>
                 </form>
               ) : (

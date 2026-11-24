@@ -7,7 +7,7 @@ import { useApp } from '../context/AppContext';
 import { Sparkles, Award, ArrowRight, Video, Target, Compass } from 'lucide-react';
 
 export const FaithAriolaStory: React.FC = () => {
-  const { navigateTo } = useApp();
+  const { navigateTo, siteSettings } = useApp();
 
   return (
     <section className="py-16 sm:py-24 bg-[#08080A] border-b border-zinc-800/80">
@@ -29,7 +29,7 @@ export const FaithAriolaStory: React.FC = () => {
                   Fondatrice & Directrice
                 </span>
                 <h3 className="font-brand text-2xl font-bold text-white">
-                  Faith Ariola
+                  {siteSettings.directorName}
                 </h3>
                 <p className="text-xs text-zinc-300 mt-1">
                   « La créativité africaine propulsée par la technologie mondiale »
@@ -44,20 +44,20 @@ export const FaithAriolaStory: React.FC = () => {
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-[#D4AF37]/30 text-xs text-[#F3E5AB]">
                 <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
-                <span>Une Vision Née à DJIFFA DESIGN AGENCY</span>
+                <span>Une Vision Née à {siteSettings.parentAgencyName}</span>
               </div>
 
               <h2 className="font-brand text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-100 leading-tight">
-                À Propos de Faith Ariola & de DJIFFA ACADEMY
+                À Propos de {siteSettings.directorName} & de {siteSettings.academyName}
               </h2>
             </div>
 
             <p className="text-sm sm:text-base text-zinc-300 leading-relaxed font-light">
-              Directrice de création et entrepreneure visionnaire, <strong>Faith Ariola</strong> a fondé <strong>DJIFFA DESIGN AGENCY</strong> avec une ambition limpide : positionner l’Afrique au premier rang de la révolution des industries créatives assistées par l’intelligence artificielle.
+              {siteSettings.directorBio}
             </p>
 
             <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
-              Face au constat que la plupart des formations en ligne se limitent à de simples démonstrations superficielles d’outils, Faith Ariola a conçu <strong>DJIFFA ACADEMY</strong> comme une véritable école des maîtres : un espace rigoureux où l’on n’apprend pas seulement à générer des images, mais à structurer des concepts publicitaires, raconter des histoires universelles et bâtir des activités lucratives pérennes.
+              {siteSettings.parentAgencyPresentation}
             </p>
 
             {/* 3 Pillars */}

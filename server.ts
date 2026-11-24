@@ -29,6 +29,40 @@ const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32
 // Idempotency store for verified payment references
 const processedTransactions = new Map<string, { status: string; verifiedAt: string; provider: string }>();
 
+interface ServerPaymentEvent {
+  id: string;
+  reference: string;
+  provider: string;
+  event: string;
+  status: string;
+  detail: string;
+  receivedAt: string;
+}
+
+interface ServerContactMessage {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string;
+  subject: string;
+  message: string;
+  status: 'new' | 'read' | 'replied';
+  adminNotes?: string;
+  createdAt: string;
+}
+
+const recentPaymentEvents: ServerPaymentEvent[] = [];
+const recentContactMessages: ServerContactMessage[] = [];
+
+function recordPaymentEvent(entry: Omit<ServerPaymentEvent, 'id' | 'receivedAt'>) {
+  recentPaymentEvents.unshift({
+    id: `pevt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    ...entry,
+    receivedAt: new Date().toISOString()
+  });
+  if (recentPaymentEvents.length > 50) recentPaymentEvents.length = 50;
+}
+
 // Server-side Supabase Admin client (NEVER exposed to browser)
 const stripEnvQuotes = (v: string | undefined) => (v || '').trim().replace(/^["']|["']$/g, '').trim();
 const supabaseUrl = stripEnvQuotes(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL);
@@ -314,10 +348,191 @@ async function startServer() {
       },
       adminSecurity: {
         email: expectedAdminEmail,
-        customCodeConfigured: customAdminPass
+        customCodeConfigured: customAdminPass,
+        isProductionMode: isProduction
       },
       environment: isProduction ? 'production' : 'development'
     });
+  });
+
+  // 3b. Public Contact Form Submission (persisted server-side & in Supabase contact_messages when available)
+  app.post('/api/public/contact', async (req, res) => {
+    const { id, name, email, phone, subject, message } = req.body || {};
+    const cleanName = String(name || '').trim().slice(0, 120);
+    const cleanEmail = String(email || '').trim().slice(0, 160);
+    const cleanPhone = phone ? String(phone).trim().slice(0, 40) : undefined;
+    const cleanSubject = String(subject || 'Demande générale').trim().slice(0, 160);
+    const cleanMessage = String(message || '').trim().slice(0, 4000);
+
+    if (!cleanName || !cleanEmail || !cleanMessage) {
+      res.status(400).json({ ok: false, error: 'Nom, email et message sont obligatoires.' });
+      return;
+    }
+
+    const item: ServerContactMessage = {
+      id: id ? String(id) : `msg-${Date.now()}`,
+      name: cleanName,
+      email: cleanEmail,
+      phone: cleanPhone,
+      subject: cleanSubject,
+      message: cleanMessage,
+      status: 'new',
+      createdAt: new Date().toISOString()
+    };
+
+    recentContactMessages.unshift(item);
+    if (recentContactMessages.length > 100) recentContactMessages.length = 100;
+
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from('contact_messages')
+        .upsert(
+          {
+            id: item.id,
+            name: item.name,
+            email: item.email,
+            phone: item.phone || null,
+            subject: item.subject,
+            message: item.message,
+            status: 'new',
+            created_at: item.createdAt
+          },
+          { onConflict: 'id' }
+        )
+        .then(() => undefined, () => undefined);
+    }
+
+    res.json({ ok: true, item });
+  });
+
+  // 3c. Public Coaching / Mentorship Request Submission (persists server-side to Supabase when active)
+  app.post('/api/public/coaching-request', async (req, res) => {
+    const {
+      id,
+      userId,
+      userName,
+      userEmail,
+      userPhone,
+      type,
+      programTitle,
+      needDescription,
+      preferredDate
+    } = req.body || {};
+
+    const cleanName = String(userName || '').trim().slice(0, 120);
+    const cleanEmail = String(userEmail || '').trim().slice(0, 160);
+    const cleanPhone = String(userPhone || '').trim().slice(0, 40);
+    const cleanNeed = String(needDescription || '').trim().slice(0, 4000);
+    const cleanDate = String(preferredDate || '').trim().slice(0, 32);
+
+    if (!cleanName || !cleanEmail || !cleanNeed || !cleanDate) {
+      res.status(400).json({ ok: false, error: 'Informations d’accompagnement incomplètes.' });
+      return;
+    }
+
+    const reqId = id ? String(id) : `req-${Date.now()}`;
+    const validType = type === 'collective' ? 'collective' : 'individual';
+
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from('coaching_requests')
+        .upsert(
+          {
+            id: reqId,
+            user_id: userId && /^[0-9a-f-]{36}$/i.test(String(userId)) ? String(userId) : null,
+            user_name: cleanName,
+            user_email: cleanEmail,
+            user_phone: cleanPhone,
+            type: validType,
+            program_title: String(programTitle || 'Accompagnement DJIFFA ACADEMY').slice(0, 200),
+            need_description: cleanNeed,
+            preferred_date: cleanDate,
+            status: 'pending'
+          },
+          { onConflict: 'id' }
+        )
+        .then(() => undefined, () => undefined);
+    }
+
+    res.json({ ok: true, id: reqId });
+  });
+
+  // 3d. Admin-only endpoints for Contact Messages & Payment Events
+  app.get('/api/admin/contact-messages', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.isAdmin) {
+      res.status(403).json({ ok: false, error: 'Accès réservé à la Direction.' });
+      return;
+    }
+
+    if (supabaseAdmin) {
+      const { data, error } = await supabaseAdmin
+        .from('contact_messages')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
+      if (!error && Array.isArray(data)) {
+        res.json({
+          ok: true,
+          messages: data.map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            email: m.email,
+            phone: m.phone || undefined,
+            subject: m.subject,
+            message: m.message,
+            status: m.status,
+            adminNotes: m.admin_notes || undefined,
+            createdAt: m.created_at
+          }))
+        });
+        return;
+      }
+    }
+
+    res.json({ ok: true, messages: recentContactMessages });
+  });
+
+  app.patch('/api/admin/contact-messages/:id', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.isAdmin) {
+      res.status(403).json({ ok: false, error: 'Accès réservé à la Direction.' });
+      return;
+    }
+    const msgId = String(req.params.id || '');
+    const { status, adminNotes } = req.body || {};
+    const validStatus = status === 'read' || status === 'replied' ? status : 'new';
+
+    const idx = recentContactMessages.findIndex((m) => m.id === msgId);
+    if (idx >= 0) {
+      recentContactMessages[idx] = {
+        ...recentContactMessages[idx],
+        status: validStatus,
+        adminNotes: adminNotes !== undefined ? String(adminNotes) : recentContactMessages[idx].adminNotes
+      };
+    }
+
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from('contact_messages')
+        .update({
+          status: validStatus,
+          admin_notes: adminNotes !== undefined ? String(adminNotes) : null
+        })
+        .eq('id', msgId)
+        .then(() => undefined, () => undefined);
+    }
+
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/payment-events', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.isAdmin) {
+      res.status(403).json({ ok: false, error: 'Accès réservé à la Direction.' });
+      return;
+    }
+    res.json({ ok: true, events: recentPaymentEvents });
   });
 
   // 4. Create real payment session (FedaPay / CinetPay / KKiaPay) + record pending order in Supabase if active
@@ -431,6 +646,14 @@ async function startServer() {
           }
         }
 
+        recordPaymentEvent({
+          reference: String(reference),
+          provider: 'fedapay',
+          event: 'create_session',
+          status: 'pending',
+          detail: `Session créée (${currency} ${Math.round(Number(amount))})`
+        });
+
         res.json({
           ok: true,
           provider: 'fedapay',
@@ -531,6 +754,13 @@ async function startServer() {
             verifiedAt: new Date().toISOString(),
             provider: 'fedapay'
           });
+          recordPaymentEvent({
+            reference: String(reference),
+            provider: 'fedapay',
+            event: 'verify',
+            status: 'confirmed',
+            detail: `Transaction ${transactionId} approuvée`
+          });
           await activateOrderEnrollmentInSupabase(String(reference), String(transactionId));
           res.json({ ok: true, verified: true, status: 'confirmed' });
           return;
@@ -558,6 +788,13 @@ async function startServer() {
             verifiedAt: new Date().toISOString(),
             provider: 'kkiapay'
           });
+          recordPaymentEvent({
+            reference: String(reference),
+            provider: 'kkiapay',
+            event: 'verify',
+            status: 'confirmed',
+            detail: `Transaction ${transactionId} approuvée`
+          });
           await activateOrderEnrollmentInSupabase(String(reference), String(transactionId));
           res.json({ ok: true, verified: true, status: 'confirmed' });
           return;
@@ -582,6 +819,13 @@ async function startServer() {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
             provider: 'cinetpay'
+          });
+          recordPaymentEvent({
+            reference: String(reference),
+            provider: 'cinetpay',
+            event: 'verify',
+            status: 'confirmed',
+            detail: `Paiement CinetPay accepté`
           });
           await activateOrderEnrollmentInSupabase(String(reference), String(transactionId || reference));
           res.json({ ok: true, verified: true, status: 'confirmed' });
@@ -660,6 +904,13 @@ async function startServer() {
           verifiedAt: new Date().toISOString(),
           provider: status.provider
         });
+        recordPaymentEvent({
+          reference: cleanRef,
+          provider: status.provider,
+          event: eventName || 'webhook',
+          status: mappedStatus,
+          detail: `Webhook reçu (${entityStatus || mappedStatus})`
+        });
         await revokeOrderEnrollmentInSupabase(cleanRef, mappedStatus);
       } else {
         if (processedTransactions.get(cleanRef)?.status === 'confirmed') {
@@ -670,6 +921,13 @@ async function startServer() {
           status: 'confirmed',
           verifiedAt: new Date().toISOString(),
           provider: status.provider
+        });
+        recordPaymentEvent({
+          reference: cleanRef,
+          provider: status.provider,
+          event: eventName || 'webhook',
+          status: 'confirmed',
+          detail: `Webhook confirmé${txId ? ` (Tx ${txId})` : ''}`
         });
         await activateOrderEnrollmentInSupabase(cleanRef, txId ? String(txId) : undefined);
       }
@@ -721,6 +979,13 @@ async function startServer() {
       status: 'refunded',
       verifiedAt: new Date().toISOString(),
       provider: status.provider
+    });
+    recordPaymentEvent({
+      reference: String(reference),
+      provider: status.provider,
+      event: 'admin_refund',
+      status: 'refunded',
+      detail: 'Remboursement déclenché par la Direction'
     });
     await revokeOrderEnrollmentInSupabase(String(reference), 'refunded');
     res.json({ ok: true, status: 'refunded' });
@@ -890,7 +1155,7 @@ async function startServer() {
       }
 
       if (Array.isArray(courses) && courses.length > 0) {
-        const publicRows = courses.map((c: any) => ({
+        const publicRowsCore = courses.map((c: any) => ({
           id: c.id,
           slug: c.slug,
           title: c.title,
@@ -928,7 +1193,19 @@ async function startServer() {
           }))
         }));
 
-        const { error: courseErr } = await supabaseAdmin.from('courses').upsert(publicRows, { onConflict: 'id' });
+        const publicRowsExtended = publicRowsCore.map((row: any, idx: number) => ({
+          ...row,
+          promo_active: Boolean(courses[idx].promoActive),
+          promo_price_xof: courses[idx].promoPriceXOF || null,
+          promo_price_eur: courses[idx].promoPriceEUR || null,
+          promo_price_usd: courses[idx].promoPriceUSD || null
+        }));
+
+        let { error: courseErr } = await supabaseAdmin.from('courses').upsert(publicRowsExtended, { onConflict: 'id' });
+        if (courseErr && /column|schema cache|42703|PGRST204/i.test(courseErr.message)) {
+          const fallbackRes = await supabaseAdmin.from('courses').upsert(publicRowsCore, { onConflict: 'id' });
+          courseErr = fallbackRes.error;
+        }
         if (courseErr) throw new Error(`Courses: ${courseErr.message}`);
 
         const privateRows = courses.map((c: any) => ({
@@ -939,7 +1216,7 @@ async function startServer() {
           .from('course_private_contents')
           .upsert(privateRows, { onConflict: 'course_id' });
         if (privErr) throw new Error(`Private contents: ${privErr.message}`);
-        counts.courses = publicRows.length;
+        counts.courses = publicRowsCore.length;
       }
 
       if (Array.isArray(promoCodes) && promoCodes.length > 0) {
@@ -988,16 +1265,34 @@ async function startServer() {
       }
 
       if (siteSettings) {
-        const { error } = await supabaseAdmin.from('site_settings').upsert(
-          {
-            id: 'default',
-            agency_logo_url: siteSettings.agencyLogoDataUrl || null,
-            contact_email: siteSettings.contactEmail,
-            contact_phone: siteSettings.contactPhone,
-            headquarters: siteSettings.headquarters
-          },
-          { onConflict: 'id' }
-        );
+        const coreSettings = {
+          id: 'default',
+          agency_logo_url: siteSettings.agencyLogoDataUrl || null,
+          contact_email: siteSettings.contactEmail,
+          contact_phone: siteSettings.contactPhone,
+          headquarters: siteSettings.headquarters
+        };
+        const extendedSettings = {
+          ...coreSettings,
+          academy_name: siteSettings.academyName,
+          parent_agency_name: siteSettings.parentAgencyName,
+          director_name: siteSettings.directorName,
+          academy_presentation: siteSettings.academyPresentation,
+          parent_agency_presentation: siteSettings.parentAgencyPresentation,
+          director_bio: siteSettings.directorBio,
+          whatsapp_number: siteSettings.whatsappNumber,
+          support_hours: siteSettings.supportHours,
+          instagram_url: siteSettings.instagramUrl,
+          linkedin_url: siteSettings.linkedinUrl,
+          youtube_url: siteSettings.youtubeUrl,
+          legal_notices: siteSettings.legalNotices,
+          terms_of_sale: siteSettings.termsOfSale
+        };
+        let { error } = await supabaseAdmin.from('site_settings').upsert(extendedSettings, { onConflict: 'id' });
+        if (error && /column|schema cache|42703|PGRST204/i.test(error.message)) {
+          const fallback = await supabaseAdmin.from('site_settings').upsert(coreSettings, { onConflict: 'id' });
+          error = fallback.error;
+        }
         if (error) throw new Error(`Settings: ${error.message}`);
         counts.siteSettings = 1;
       }
@@ -1096,15 +1391,47 @@ async function startServer() {
           }
           break;
         }
-        case 'update_coaching_status':
-          await supabaseAdmin
+        case 'update_coaching_status': {
+          const updateExt: Record<string, unknown> = {
+            status: payload?.status,
+            meeting_link: payload?.meetingLink ?? null,
+            admin_notes: payload?.adminNotes ?? null
+          };
+          const resExt = await supabaseAdmin
             .from('coaching_requests')
+            .update(updateExt)
+            .eq('id', String(payload?.id || ''));
+          if (resExt.error && /column|schema cache|42703|PGRST204/i.test(resExt.error.message)) {
+            await supabaseAdmin
+              .from('coaching_requests')
+              .update({
+                status: payload?.status,
+                meeting_link: payload?.meetingLink ?? null
+              })
+              .eq('id', String(payload?.id || ''));
+          }
+          break;
+        }
+        case 'update_contact_message_status': {
+          const msgId = String(payload?.id || '');
+          const idx = recentContactMessages.findIndex((m) => m.id === msgId);
+          if (idx >= 0) {
+            recentContactMessages[idx] = {
+              ...recentContactMessages[idx],
+              status: payload?.status || recentContactMessages[idx].status,
+              adminNotes: payload?.adminNotes !== undefined ? payload.adminNotes : recentContactMessages[idx].adminNotes
+            };
+          }
+          await supabaseAdmin
+            .from('contact_messages')
             .update({
               status: payload?.status,
-              meeting_link: payload?.meetingLink ?? null
+              admin_notes: payload?.adminNotes ?? null
             })
-            .eq('id', String(payload?.id || ''));
+            .eq('id', msgId)
+            .then(() => undefined, () => undefined);
           break;
+        }
         case 'grant_access':
           if (payload?.userId && payload?.courseId && /^[0-9a-f-]{36}$/i.test(String(payload.userId))) {
             await supabaseAdmin.from('enrollments').upsert(

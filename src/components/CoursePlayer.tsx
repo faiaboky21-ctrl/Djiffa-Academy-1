@@ -8,6 +8,7 @@ import { useApp } from '../context/AppContext';
 import { Lesson, CourseModule } from '../types';
 import { resolveVideoSource, isSupabaseStorageRef, fetchProtectedSignedMediaUrl } from '../lib/media';
 import { getSupabaseAccessToken } from '../lib/supabase';
+import { sanitizeLessonHtml } from '../lib/sanitizeHtml';
 import {
   ArrowLeft,
   CheckCircle,
@@ -620,7 +621,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
             <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-6">
               <div
                 className="prose prose-invert max-w-none text-xs sm:text-sm text-zinc-300 leading-relaxed space-y-3"
-                dangerouslySetInnerHTML={{ __html: currentLesson.contentHtml }}
+                dangerouslySetInnerHTML={{ __html: sanitizeLessonHtml(currentLesson.contentHtml) }}
               />
               {currentLesson.keyTakeaways && currentLesson.keyTakeaways.length > 0 && (
                 <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800/80 space-y-2.5">

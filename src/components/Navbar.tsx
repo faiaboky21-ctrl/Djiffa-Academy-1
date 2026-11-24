@@ -79,10 +79,16 @@ export const Navbar: React.FC = () => {
           )}
           <div className="flex flex-col">
             <span className="font-brand text-lg sm:text-xl font-extrabold tracking-widest text-slate-100 uppercase group-hover:text-[#F3E5AB] transition-colors whitespace-nowrap">
-              DJIFFA <span className="text-[#D4AF37]">ACADEMY</span>
+              {siteSettings.academyName.toUpperCase().includes('DJIFFA') ? (
+                <>
+                  DJIFFA <span className="text-[#D4AF37]">{siteSettings.academyName.replace(/djiffa\s*/i, '') || 'ACADEMY'}</span>
+                </>
+              ) : (
+                siteSettings.academyName
+              )}
             </span>
-            <span className="text-[10px] tracking-wider uppercase text-zinc-400 font-medium whitespace-nowrap">
-              Par DJIFFA DESIGN AGENCY
+            <span className="text-[10px] tracking-wider uppercase text-zinc-400 font-medium whitespace-nowrap truncate max-w-[190px] sm:max-w-none">
+              Par {siteSettings.parentAgencyName}
             </span>
           </div>
         </button>

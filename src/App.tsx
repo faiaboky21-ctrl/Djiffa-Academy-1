@@ -23,7 +23,8 @@ import { CheckoutModal } from './components/CheckoutModal';
 import { CertificateModal } from './components/CertificateModal';
 import { AuthModal } from './components/AuthModal';
 import { Course } from './types';
-import { ArrowRight, Sparkles, CheckCircle, MessageSquareQuote, X, Info } from 'lucide-react';
+import { getCoursePricing } from './lib/pricing';
+import { ArrowRight, ArrowLeft, Sparkles, CheckCircle, MessageSquareQuote, X, Info, Scale } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -33,6 +34,8 @@ const MainAppContent: React.FC = () => {
     navigateTo,
     courses,
     testimonials,
+    siteSettings,
+    formatPrice,
     paymentReturnNotice,
     dismissPaymentReturnNotice
   } = useApp();
@@ -42,6 +45,7 @@ const MainAppContent: React.FC = () => {
 
   const featuredCourses = courses.filter((c) => c.isFeatured && c.isPublished);
   const flagshipCourse = courses.find((c) => c.id === 'course-faith-ariola-methode') || courses[0];
+  const flagshipPricing = flagshipCourse ? getCoursePricing(flagshipCourse) : null;
 
   if (activeView === 'player' && selectedCourseId) {
     return (
@@ -158,9 +162,17 @@ const MainAppContent: React.FC = () => {
                             onClick={() => setCheckoutCourse(flagshipCourse)}
                             className="px-6 py-3.5 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-extrabold text-xs uppercase tracking-wider transition-all shadow-lg flex items-center gap-2 cursor-pointer"
                           >
-                            <span>Acheter cette formation</span>
+                            <span>
+                              Acheter · {flagshipPricing ? formatPrice(flagshipPricing.activeXOF) : ''}
+                            </span>
                             <ArrowRight className="w-4 h-4" />
                           </button>
+
+                          {flagshipPricing?.isPromo && flagshipPricing.crossedOutXOF && (
+                            <span className="text-xs text-zinc-400 line-through tabular-nums">
+                              {formatPrice(flagshipPricing.crossedOutXOF)}
+                            </span>
+                          )}
 
                           <button
                             onClick={() => navigateTo('course-detail', flagshipCourse.id)}
@@ -297,6 +309,49 @@ const MainAppContent: React.FC = () => {
         )}
 
         {activeView === 'contact' && <ContactSection />}
+
+        {(activeView === 'legal-cgv' || activeView === 'legal-mentions') && (
+          <section className="py-14 sm:py-20 bg-[#08080A]">
+            <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+              <button
+                onClick={() => navigateTo('home')}
+                className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-[#D4AF37] cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Retour à l’accueil</span>
+              </button>
+
+              <div className="p-6 sm:p-10 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-5 shadow-xl">
+                <div className="flex items-center gap-2.5 text-[#D4AF37]">
+                  <Scale className="w-5 h-5" />
+                  <span className="text-xs uppercase tracking-wider font-semibold">
+                    {siteSettings.academyName} · {siteSettings.parentAgencyName}
+                  </span>
+                </div>
+
+                <h1 className="font-brand text-2xl sm:text-3xl font-bold text-slate-100">
+                  {activeView === 'legal-cgv'
+                    ? 'Conditions Générales de Vente (CGV)'
+                    : 'Mentions Légales'}
+                </h1>
+
+                <div className="pt-4 border-t border-zinc-800 text-xs sm:text-sm text-zinc-300 leading-relaxed whitespace-pre-line">
+                  {activeView === 'legal-cgv'
+                    ? siteSettings.termsOfSale
+                    : siteSettings.legalNotices}
+                </div>
+
+                <div className="pt-4 border-t border-zinc-900 text-[11px] text-zinc-400 flex flex-wrap gap-x-4 gap-y-1">
+                  <span>Directrice : {siteSettings.directorName}</span>
+                  <span>·</span>
+                  <span>Siège : {siteSettings.headquarters}</span>
+                  <span>·</span>
+                  <span>Contact : {siteSettings.contactEmail}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
       </main>
 
       <Footer />

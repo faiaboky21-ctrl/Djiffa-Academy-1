@@ -14,6 +14,7 @@ export const AuthModal: React.FC = () => {
     authModalMode,
     closeAuthModal,
     supabaseReady,
+    infraStatus,
     adminSessionExpiredNotice,
     signInWithEmailPassword,
     signUpWithEmailPassword,
@@ -330,9 +331,12 @@ export const AuthModal: React.FC = () => {
                 <Lock className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
                 <span>
                   Espace strictement réservé à la Direction. La vérification s’effectue côté serveur.
-                  <span className="block text-zinc-400 mt-1">
-                    Code de démonstration par défaut (si non défini dans les variables serveur) : <strong className="font-mono text-white">DJIFFA-ADMIN</strong>
-                  </span>
+                  {!infraStatus?.adminSecurity?.customCodeConfigured &&
+                    !infraStatus?.adminSecurity?.isProductionMode && (
+                      <span className="block text-zinc-400 mt-1">
+                        Code de démonstration local : <strong className="font-mono text-white">DJIFFA-ADMIN</strong>
+                      </span>
+                    )}
                 </span>
               </div>
 

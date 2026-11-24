@@ -7,6 +7,7 @@
 import React, { useState, useEffect } from 'react';
 import { Course, PaymentMethod, Order } from '../types';
 import { useApp } from '../context/AppContext';
+import { getCoursePricing, getCourseAmountInCurrency } from '../lib/pricing';
 import {
   X,
   ShieldCheck,
@@ -46,9 +47,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
     signInWithEmailPassword
   } = useApp();
 
-  const [step, setStep] = useState<'account' | 'details' | 'processing' | 'confirmed' | 'failed'>(
+  const [step, setStep] = useState<'account' | 'details' | 'processing' | 'demo_recorded' | 'confirmed' | 'failed'>(
     currentUser ? 'details' : 'account'
   );
+  const pricing = getCoursePricing(course);
   const [accountMode, setAccountMode] = useState<'register' | 'login'>('register');
 
   // Account creation/login fields
@@ -141,8 +143,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
     try {
       const verify = await verifyExistingPayment(pendingRef, pendingTxId || undefined, course.id);
       if (verify.verified && currentUser) {
-        const baseAmount =
-          currency === 'EUR' ? course.priceEUR : currency === 'USD' ? course.priceUSD : course.priceXOF;
+        const baseAmount = getCourseAmountInCurrency(course, currency);
         const finalAmount = Math.max(0, Math.round(baseAmount * (1 - discountRatio)));
         setConfirmedOrder({
           id: `ord-${Date.now()}`,
@@ -200,8 +201,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
     setStep('processing');
 
     try {
-      const baseAmount =
-        currency === 'EUR' ? course.priceEUR : currency === 'USD' ? course.priceUSD : course.priceXOF;
+      const baseAmount = getCourseAmountInCurrency(course, currency);
       const finalAmount = Math.max(0, Math.round(baseAmount * (1 - discountRatio)));
 
       // Real server payment session initialization
@@ -260,11 +260,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
 
       if (result.success) {
         setConfirmedOrder(result.order);
-        setStep('confirmed');
-        try {
-          confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
-        } catch (err) {
-          console.error(err);
+        if (result.isDemoRecorded || result.order.isDemoTransaction) {
+          setStep('demo_recorded');
+        } else {
+          setStep('confirmed');
+          try {
+            confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
+          } catch (err) {
+            console.error(err);
+          }
         }
       } else {
         setStep('failed');
@@ -339,9 +343,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                   <span className="text-[11px] text-zinc-400">Étape 1/2 : Identification apprenant</span>
                 </div>
               </div>
-              <span className="font-brand text-base font-bold text-[#D4AF37] tabular-nums shrink-0">
-                {formatPrice(course.priceXOF)}
-              </span>
+              <div className="text-right shrink-0">
+                <span className="font-brand text-base font-bold text-[#D4AF37] tabular-nums block">
+                  {formatPrice(pricing.activeXOF)}
+                </span>
+                {pricing.isPromo && pricing.crossedOutXOF && (
+                  <span className="text-[11px] text-zinc-500 line-through tabular-nums">
+                    {formatPrice(pricing.crossedOutXOF)}
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-900 rounded-xl border border-zinc-800">
@@ -527,9 +538,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               </div>
 
               <div className="text-right shrink-0">
-                <span className="font-brand text-base sm:text-lg font-bold text-[#D4AF37] tabular-nums">
-                  {formatPrice(course.priceXOF * (1 - discountRatio))}
+                <span className="font-brand text-base sm:text-lg font-bold text-[#D4AF37] tabular-nums block">
+                  {formatPrice(pricing.activeXOF * (1 - discountRatio))}
                 </span>
+                {pricing.isPromo && pricing.crossedOutXOF && (
+                  <span className="text-[11px] text-zinc-500 line-through tabular-nums">
+                    {formatPrice(pricing.crossedOutXOF)}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -539,34 +555,34 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                 Choisissez votre moyen de paiement
               </span>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <button
                   type="button"
                   onClick={() => setSelectedMethod('mtn_momo')}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer min-h-[76px] ${
                     selectedMethod === 'mtn_momo'
                       ? 'bg-amber-950/20 border-[#D4AF37] text-white'
                       : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center justify-between mb-1.5">
                     <Smartphone className="w-4 h-4 text-[#D4AF37]" />
-                    <span className="text-[10px] font-bold text-amber-400">MTN MoMo</span>
+                    <span className="text-[10px] font-bold text-amber-400">MTN</span>
                   </div>
-                  <span className="text-xs font-semibold block">MTN Bénin</span>
+                  <span className="text-xs font-semibold block">MTN MoMo</span>
                   <span className="text-[10px] text-zinc-500">Mobile Money</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setSelectedMethod('moov_momo')}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer min-h-[76px] ${
                     selectedMethod === 'moov_momo'
                       ? 'bg-amber-950/20 border-[#D4AF37] text-white'
                       : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center justify-between mb-1.5">
                     <Smartphone className="w-4 h-4 text-[#D4AF37]" />
                     <span className="text-[10px] font-bold text-blue-400">Moov</span>
                   </div>
@@ -577,17 +593,34 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                 <button
                   type="button"
                   onClick={() => setSelectedMethod('card_visa')}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer ${
-                    selectedMethod.startsWith('card')
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer min-h-[76px] ${
+                    selectedMethod === 'card_visa'
                       ? 'bg-amber-950/20 border-[#D4AF37] text-white'
                       : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center justify-between mb-1.5">
                     <CreditCard className="w-4 h-4 text-[#D4AF37]" />
-                    <span className="text-[10px] font-bold text-zinc-300">Visa / MC</span>
+                    <span className="text-[10px] font-bold text-zinc-300">VISA</span>
                   </div>
-                  <span className="text-xs font-semibold block">Carte Bancaire</span>
+                  <span className="text-xs font-semibold block">Carte Visa</span>
+                  <span className="text-[10px] text-zinc-500">International</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedMethod('card_mastercard')}
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer min-h-[76px] ${
+                    selectedMethod === 'card_mastercard'
+                      ? 'bg-amber-950/20 border-[#D4AF37] text-white'
+                      : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <CreditCard className="w-4 h-4 text-[#D4AF37]" />
+                    <span className="text-[10px] font-bold text-orange-300">MC</span>
+                  </div>
+                  <span className="text-xs font-semibold block">Mastercard</span>
                   <span className="text-[10px] text-zinc-500">International</span>
                 </button>
               </div>
@@ -672,8 +705,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               <ShieldCheck className="w-5 h-5" />
               <span>
                 {paymentConfig.serverConfigured
-                  ? `Payer maintenant · ${formatPrice(course.priceXOF * (1 - discountRatio))}`
-                  : `Simuler un achat de test (Démo) · ${formatPrice(course.priceXOF * (1 - discountRatio))}`}
+                  ? `Payer maintenant · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`
+                  : `Enregistrer une demande / test Démo · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`}
               </span>
             </button>
           </form>
@@ -691,6 +724,66 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             <p className="text-xs text-zinc-400 max-w-sm mx-auto">
               Communication avec le serveur DJIFFA ACADEMY ({paymentConfig.serverConfigured ? 'Vérification prestataire' : 'Mode Test / Démonstration'}).
             </p>
+          </div>
+        )}
+
+        {/* Demo / Unverified Isolation Screen */}
+        {step === 'demo_recorded' && confirmedOrder && (
+          <div className="p-7 sm:p-8 text-center space-y-5">
+            <div className="w-16 h-16 rounded-full bg-amber-950 border border-[#D4AF37] mx-auto flex items-center justify-center text-[#D4AF37] shadow-xl">
+              <Info className="w-9 h-9" />
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-xs uppercase tracking-widest text-[#D4AF37] font-semibold">
+                Mode Démonstration — Aucun débit réel
+              </span>
+              <h4 className="font-brand text-xl sm:text-2xl font-bold text-slate-100">
+                Commande Test Enregistrée (En Attente)
+              </h4>
+              <p className="text-xs text-zinc-300 max-w-md mx-auto leading-relaxed">
+                Par mesure de sécurité, les tests en mode démonstration n’ouvrent jamais l’accès à une formation payante et ne sont pas comptabilisés dans le chiffre d’affaires réel. L’accès sera activé après paiement vérifié ou validation manuelle par la Direction.
+              </p>
+            </div>
+
+            <div className="p-4 sm:p-5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-left space-y-2 text-xs">
+              <div className="flex justify-between pb-2 border-b border-zinc-800">
+                <span className="text-zinc-400">Référence :</span>
+                <span className="font-mono font-bold text-[#F3E5AB]">{confirmedOrder.reference}</span>
+              </div>
+              <div className="flex justify-between pb-2 border-b border-zinc-800">
+                <span className="text-zinc-400">Formation :</span>
+                <span className="font-semibold text-slate-200 line-clamp-1">{confirmedOrder.courseTitle}</span>
+              </div>
+              <div className="flex justify-between pb-2 border-b border-zinc-800">
+                <span className="text-zinc-400">Montant affiché :</span>
+                <span className="font-mono font-bold text-[#D4AF37] tabular-nums">
+                  {confirmedOrder.amount.toLocaleString('fr-FR')} {confirmedOrder.currency}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Statut actuel :</span>
+                <span className="text-amber-400 font-semibold">En attente (DÉMO non payée)</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={onClose}
+                className="flex-1 py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider cursor-pointer"
+              >
+                Fermer cette fenêtre
+              </button>
+              <button
+                onClick={() => {
+                  onClose();
+                  navigateTo('student-space');
+                }}
+                className="py-3 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-semibold cursor-pointer"
+              >
+                Voir mon Espace Apprenant
+              </button>
+            </div>
           </div>
         )}
 

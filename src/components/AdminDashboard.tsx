@@ -1,12 +1,14 @@
 /**
- * DJIFFA ACADEMY - Secure Administrative Dashboard
+ * DJIFFA ACADEMY - Secure Administrative Dashboard (Espace Direction)
  * Reserved for Director Faith Ariola (verified via /api/auth/admin-verify)
- * Manages courses, curriculum modules/lessons, domains, students, orders, promos, coaching, agency logo, testimonials, and payment status
+ * Manages overview KPIs (real vs demo separation), courses, promo pricing, categories, students,
+ * orders, promo codes, coaching, contact messages, payments/webhooks, brand/site identity, legal texts, testimonials & Launch Center
  */
 
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { Course, CourseModule, Lesson } from '../types';
+import { Course, CourseModule, Lesson, ContactMessage } from '../types';
+import { getCoursePricing } from '../lib/pricing';
 import { getSupabaseAccessToken } from '../lib/supabase';
 import { createPreMigrationBackup, loadStoredBackupMeta } from '../lib/migration';
 import { LaunchCenter } from './LaunchCenter';
@@ -20,7 +22,6 @@ import {
   Edit3,
   Trash2,
   X,
-  Key,
   TrendingUp,
   FileText,
   Tag,
@@ -35,8 +36,27 @@ import {
   UploadCloud,
   Database,
   RotateCcw,
-  Rocket
+  Rocket,
+  Mail,
+  CreditCard,
+  Copy,
+  Check,
+  Search,
+  Sparkles,
+  ExternalLink,
+  Bell
 } from 'lucide-react';
+
+type AdminTab =
+  | 'overview'
+  | 'courses'
+  | 'students'
+  | 'orders'
+  | 'coaching'
+  | 'messages'
+  | 'payments'
+  | 'identity'
+  | 'launch-center';
 
 const escapeHtmlText = (str: string) =>
   str
@@ -57,6 +77,8 @@ export const AdminDashboard: React.FC = () => {
     students,
     orders,
     coachingRequests,
+    contactMessages,
+    paymentEvents,
     paymentConfig,
     infraStatus,
     adminToken,
@@ -74,22 +96,20 @@ export const AdminDashboard: React.FC = () => {
     updateOrderStatus,
     refundOrderServer,
     updateCoachingStatus,
+    updateContactMessageStatus,
     grantManualCourseAccess,
     revokeCourseAccess,
     refreshServerPaymentStatus,
     migrateLocalCatalogToCloud,
     refreshSupabaseAdminData,
+    refreshAdminTelemetry,
     currentUser,
     adminSessionExpiredNotice,
     dismissAdminSessionExpiredNotice,
     openAuthModal
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<
-    'overview' | 'launch-center' | 'courses' | 'students' | 'orders' | 'coaching' | 'settings'
-  >('overview');
-
-  // Confirmation state for destructive deletes
+  const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   // Course editing state
@@ -120,10 +140,23 @@ export const AdminDashboard: React.FC = () => {
   const [newDomainShort, setNewDomainShort] = useState('');
   const [newDomainDesc, setNewDomainDesc] = useState('');
 
+  // Students search
+  const [studentSearch, setStudentSearch] = useState('');
+
   // Orders filter & Promo form
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
   const [newPromoCode, setNewPromoCode] = useState('');
   const [newPromoPercent, setNewPromoPercent] = useState(15);
+
+  // Contact messages filter & drafts
+  const [messageFilter, setMessageFilter] = useState<'all' | ContactMessage['status']>('all');
+  const [msgNoteDrafts, setMsgNoteDrafts] = useState<Record<string, string>>({});
+
+  // Coaching note drafts
+  const [coachNoteDrafts, setCoachNoteDrafts] = useState<Record<string, string>>({});
+
+  // Webhook URL copy feedback
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
 
   // Site settings & Testimonial form
   const [settingsForm, setSettingsForm] = useState(siteSettings);
@@ -144,6 +177,12 @@ export const AdminDashboard: React.FC = () => {
     setSettingsForm(siteSettings);
   }, [siteSettings]);
 
+  useEffect(() => {
+    if (currentUser?.role === 'admin') {
+      refreshAdminTelemetry();
+    }
+  }, [currentUser?.role, refreshAdminTelemetry]);
+
   // Strict security gate
   if (!currentUser || currentUser.role !== 'admin') {
     return (
@@ -160,14 +199,14 @@ export const AdminDashboard: React.FC = () => {
           </div>
         )}
         <p className="text-xs text-zinc-400 leading-relaxed">
-          Aucun visiteur ni compte apprenant ordinaire ne peut accéder à cet espace. Veuillez vous authentifier avec les identifiants de Direction de Faith Ariola.
+          Aucun visiteur ni compte apprenant ordinaire ne peut accéder à cet espace. Veuillez vous authentifier avec les identifiants de Direction de {siteSettings.directorName}.
         </p>
         <button
           onClick={() => {
             dismissAdminSessionExpiredNotice();
             openAuthModal('admin');
           }}
-          className="px-6 py-3 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider cursor-pointer"
+          className="px-6 py-3 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider cursor-pointer min-h-[44px]"
         >
           Connexion Administratrice
         </button>
@@ -175,22 +214,61 @@ export const AdminDashboard: React.FC = () => {
     );
   }
 
-  // Metrics
-  const confirmedOrders = orders.filter((o) => o.status === 'confirmed');
+  // Strict separation: Real confirmed orders vs Demo/Test transactions
+  const realOrders = orders.filter((o) => !o.isDemoTransaction);
+  const demoOrders = orders.filter((o) => o.isDemoTransaction);
+  const confirmedRealOrders = realOrders.filter((o) => o.status === 'confirmed');
   const pendingOrders = orders.filter((o) => o.status === 'pending' || o.status === 'processing');
-  const failedOrders = orders.filter((o) => o.status === 'failed' || o.status === 'cancelled');
+  const failedOrders = orders.filter((o) => o.status === 'failed' || o.status === 'cancelled' || o.status === 'refunded');
 
-  const totalRevenueXOF = confirmedOrders.reduce(
+  const realRevenueXOF = confirmedRealOrders.reduce(
     (acc, curr) => acc + (curr.currency === 'XOF' ? curr.amount : curr.amount * 655),
     0
   );
 
-  // Sales breakdown by course
+  // Real sales breakdown by course (excludes demo tests)
   const salesByCourse = courses.map((c) => {
-    const matching = confirmedOrders.filter((o) => o.courseId === c.id);
+    const matching = confirmedRealOrders.filter((o) => o.courseId === c.id);
     const rev = matching.reduce((acc, o) => acc + (o.currency === 'XOF' ? o.amount : o.amount * 655), 0);
     return { id: c.id, title: c.title, count: matching.length, revenueXOF: rev };
   });
+
+  const unreadMessagesCount = contactMessages.filter((m) => m.status === 'new').length;
+  const pendingCoachingCount = coachingRequests.filter((c) => c.status === 'pending').length;
+
+  const filteredStudents = students.filter((s) => {
+    if (!studentSearch.trim()) return true;
+    const q = studentSearch.toLowerCase();
+    return (
+      s.name.toLowerCase().includes(q) ||
+      s.email.toLowerCase().includes(q) ||
+      (s.phone && s.phone.toLowerCase().includes(q)) ||
+      (s.country && s.country.toLowerCase().includes(q))
+    );
+  });
+
+  const filteredOrders = orders.filter((o) => {
+    if (orderStatusFilter === 'all') return true;
+    if (orderStatusFilter === 'real') return !o.isDemoTransaction;
+    if (orderStatusFilter === 'demo') return o.isDemoTransaction;
+    return o.status === orderStatusFilter;
+  });
+
+  const filteredMessages = contactMessages.filter((m) =>
+    messageFilter === 'all' ? true : m.status === messageFilter
+  );
+
+  const emptyDraft = {
+    title: '',
+    duration: '',
+    videoUrl: '',
+    summary: '',
+    pdfName: '',
+    pdfUrl: '',
+    exTitle: '',
+    exInstructions: '',
+    exCorrection: ''
+  };
 
   const handleSaveCourseForm = (e: React.FormEvent) => {
     e.preventDefault();
@@ -247,18 +325,6 @@ export const AdminDashboard: React.FC = () => {
         return { ...m, lessons: copy };
       })
     });
-  };
-
-  const emptyDraft = {
-    title: '',
-    duration: '',
-    videoUrl: '',
-    summary: '',
-    pdfName: '',
-    pdfUrl: '',
-    exTitle: '',
-    exInstructions: '',
-    exCorrection: ''
   };
 
   const handleAddLessonToModule = (modId: string) => {
@@ -355,6 +421,27 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !editingCourse) return;
+
+    if (infraStatus?.supabase.serverConnected) {
+      const cloudUrl = await uploadMediaToCloud('brand-assets', file, 'covers');
+      if (cloudUrl) {
+        setEditingCourse({ ...editingCourse, coverImage: cloudUrl });
+        return;
+      }
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setEditingCourse({ ...editingCourse, coverImage: reader.result });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -386,51 +473,71 @@ export const AdminDashboard: React.FC = () => {
     setTimeout(() => setSettingsSaved(false), 3000);
   };
 
-  const filteredOrders =
-    orderStatusFilter === 'all' ? orders : orders.filter((o) => o.status === orderStatusFilter);
+  const webhookUrl = `${window.location.origin}/api/payments/webhook`;
+
+  const copyWebhookUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setCopiedWebhook(true);
+      setTimeout(() => setCopiedWebhook(false), 2000);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
+  const navItems: Array<{ id: AdminTab; label: string; badge?: number; icon: React.ComponentType<{ className?: string }> }> = [
+    { id: 'overview', label: 'Vue d’ensemble', icon: TrendingUp },
+    { id: 'courses', label: `Formations (${courses.length})`, icon: BookOpen },
+    { id: 'students', label: `Apprenants (${students.length})`, icon: Users },
+    { id: 'orders', label: `Commandes (${orders.length})`, icon: DollarSign },
+    { id: 'coaching', label: 'Accompagnement', badge: pendingCoachingCount || undefined, icon: HelpCircle },
+    { id: 'messages', label: 'Messages', badge: unreadMessagesCount || undefined, icon: Mail },
+    { id: 'payments', label: 'Paiements & Flux', icon: CreditCard },
+    { id: 'identity', label: 'Identité & Site', icon: ImageIcon },
+    { id: 'launch-center', label: 'Centre de lancement', icon: Rocket }
+  ];
 
   return (
-    <div className="py-10 sm:py-16 bg-[#08080A]">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-10">
+    <div className="py-6 sm:py-12 bg-[#08080A] min-h-screen">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6 sm:space-y-8">
         
         {/* Top Director Brand Banner */}
-        <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-2xl">
+        <div className="p-5 sm:p-8 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 flex flex-col lg:flex-row lg:items-center justify-between gap-5 shadow-2xl">
           <div className="flex items-center gap-4">
             <img
               src="/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg"
-              alt="Faith Ariola"
-              className="w-16 h-16 rounded-full object-cover border-2 border-[#D4AF37] shadow-lg shrink-0"
+              alt={siteSettings.directorName}
+              className="w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover border-2 border-[#D4AF37] shadow-lg shrink-0"
               referrerPolicy="no-referrer"
             />
-            <div>
-              <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded text-[10px] font-semibold bg-[#D4AF37]/15 text-[#F3E5AB] border border-[#D4AF37]/30 mb-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-[#D4AF37]" />
-                ADMINISTRATION PRIVÉE · DJIFFA DESIGN AGENCY
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-[#D4AF37] mb-1">
+                ADMINISTRATION PRIVÉE · {siteSettings.parentAgencyName}
               </div>
-              <h1 className="font-brand text-2xl sm:text-3xl font-bold text-slate-100">
-                Tableau de Bord Directrice — Faith Ariola
+              <h1 className="font-brand text-xl sm:text-3xl font-bold text-slate-100 truncate">
+                Espace Direction — {siteSettings.directorName}
               </h1>
               <p className="text-xs text-zinc-400">
-                Formations, contenus, apprenants, ventes, accompagnement et identité de marque
+                {siteSettings.academyName} · Gestion complète des formations, tarifs, ventes, apprenants et identité
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={() => setActiveTab('launch-center')}
-              className={`px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+              className={`px-3.5 py-2.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer min-h-[44px] ${
                 activeTab === 'launch-center'
                   ? 'bg-[#D4AF37] text-zinc-950'
-                  : 'bg-[#D4AF37]/15 hover:bg-[#D4AF37]/25 text-[#F3E5AB] border border-[#D4AF37]/40'
+                  : 'bg-zinc-900 hover:bg-zinc-800 text-[#F3E5AB] border border-[#D4AF37]/40'
               }`}
             >
-              <Rocket className="w-3.5 h-3.5" />
+              <Rocket className="w-4 h-4" />
               <span>Centre de lancement</span>
             </button>
             <span
-              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase ${
+              className={`px-3 py-2 rounded-lg text-[11px] font-bold uppercase ${
                 paymentConfig.serverConfigured
                   ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
                   : 'bg-amber-950 text-amber-300 border border-amber-800'
@@ -443,59 +550,74 @@ export const AdminDashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* Admin Navigation Tabs */}
-        <div className="flex items-center gap-2 p-1.5 bg-zinc-900/80 rounded-xl border border-zinc-800 overflow-x-auto no-scrollbar">
-          {[
-            { id: 'overview', label: 'Vue d’ensemble', icon: TrendingUp },
-            { id: 'launch-center', label: 'Centre de lancement', icon: Rocket },
-            { id: 'courses', label: `Formations & Catégories (${courses.length})`, icon: BookOpen },
-            { id: 'students', label: `Apprenants (${students.length})`, icon: Users },
-            { id: 'orders', label: `Commandes & Promos (${orders.length})`, icon: DollarSign },
-            { id: 'coaching', label: `Accompagnement (${coachingRequests.length})`, icon: HelpCircle },
-            { id: 'settings', label: 'Logo, Paiements & Site', icon: Key }
-          ].map((t) => {
+        {/* Mobile Quick Selector (Android-friendly) */}
+        <div className="md:hidden">
+          <label className="text-[11px] text-zinc-400 font-semibold block mb-1.5 uppercase tracking-wider">
+            Section Espace Direction
+          </label>
+          <select
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value as AdminTab)}
+            className="w-full px-4 py-3 rounded-xl bg-zinc-900 border border-[#D4AF37]/40 text-sm font-semibold text-slate-100 min-h-[46px]"
+          >
+            {navItems.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label} {item.badge ? `(${item.badge} à traiter)` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Desktop & Tablet Navigation Tabs */}
+        <div className="hidden md:flex items-center gap-1.5 p-1.5 bg-zinc-900/90 rounded-xl border border-zinc-800 overflow-x-auto no-scrollbar">
+          {navItems.map((t) => {
             const Icon = t.icon;
             return (
               <button
                 key={t.id}
-                onClick={() => setActiveTab(t.id as typeof activeTab)}
-                className={`px-4 py-2 text-xs font-semibold rounded-lg transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+                onClick={() => setActiveTab(t.id)}
+                className={`px-3.5 py-2.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-2 min-h-[40px] ${
                   activeTab === t.id ? 'bg-[#D4AF37] text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{t.label}</span>
+                {t.badge && t.badge > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                      activeTab === t.id ? 'bg-zinc-950 text-[#D4AF37]' : 'bg-[#D4AF37]/20 text-[#F3E5AB]'
+                    }`}
+                  >
+                    {t.badge}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
 
-        {/* TAB LAUNCH CENTER */}
-        {activeTab === 'launch-center' && (
-          <LaunchCenter onNavigateAdminTab={(tab) => setActiveTab(tab)} />
-        )}
-
         {/* TAB 1: OVERVIEW */}
         {activeTab === 'overview' && (
           <div className="space-y-8">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
               <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
-                <span className="text-xs text-zinc-400">Volume des commandes confirmées</span>
+                <span className="text-xs text-zinc-400">Chiffre d’affaires réel vérifié</span>
                 <div className="font-brand text-2xl font-extrabold text-[#D4AF37] tabular-nums">
-                  {formatPrice(totalRevenueXOF, 'XOF')}
+                  {formatPrice(realRevenueXOF, 'XOF')}
                 </div>
-                <span className="text-[10px] text-zinc-500 block">
-                  Inclut les transactions de test marquées Démo
+                <span className="text-[11px] text-zinc-400 block">
+                  {confirmedRealOrders.length} vente(s) réelle(s) confirmée(s) ·{' '}
+                  <span className="text-amber-400">{demoOrders.length} test(s) Démo exclu(s)</span>
                 </span>
               </div>
 
               <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
                 <span className="text-xs text-zinc-400">Statuts des paiements</span>
                 <div className="font-brand text-2xl font-extrabold text-emerald-400 tabular-nums">
-                  {confirmedOrders.length} confirmés
+                  {confirmedRealOrders.length} payés
                 </div>
-                <span className="text-[10px] text-zinc-400 block">
-                  {pendingOrders.length} en attente · {failedOrders.length} échoués/annulés
+                <span className="text-[11px] text-zinc-400 block">
+                  {pendingOrders.length} en attente · {failedOrders.length} échoués/remboursés
                 </span>
               </div>
 
@@ -504,25 +626,70 @@ export const AdminDashboard: React.FC = () => {
                 <div className="font-brand text-2xl font-extrabold text-slate-100 tabular-nums">
                   {students.length}
                 </div>
-                <span className="text-[10px] text-zinc-500 block">
-                  Sur {courses.length} formations actives
+                <span className="text-[11px] text-zinc-400 block">
+                  {courses.filter((c) => c.isPublished).length} publiée(s) sur {courses.length} formations
                 </span>
               </div>
 
               <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
-                <span className="text-xs text-zinc-400">Demandes d’accompagnement</span>
+                <span className="text-xs text-zinc-400">Suivi Direction</span>
                 <div className="font-brand text-2xl font-extrabold text-amber-400 tabular-nums">
-                  {coachingRequests.filter((c) => c.status === 'pending').length} à traiter
+                  {pendingCoachingCount + unreadMessagesCount} à traiter
                 </div>
-                <span className="text-[10px] text-zinc-500 block">
-                  Total : {coachingRequests.length} demandes reçues
+                <span className="text-[11px] text-zinc-400 block">
+                  {pendingCoachingCount} coaching(s) · {unreadMessagesCount} message(s) non lu(s)
                 </span>
               </div>
             </div>
 
-            {/* Ventes par formation */}
+            {/* Action Shortcuts */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+              <button
+                onClick={() => setActiveTab('messages')}
+                className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 hover:border-[#D4AF37]/50 text-left flex items-center justify-between cursor-pointer"
+              >
+                <div>
+                  <span className="font-bold text-slate-100 block">Messages Contact</span>
+                  <span className="text-zinc-400">{unreadMessagesCount} nouveau(x) message(s)</span>
+                </div>
+                <Mail className="w-5 h-5 text-[#D4AF37]" />
+              </button>
+
+              <button
+                onClick={() => setActiveTab('coaching')}
+                className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 hover:border-[#D4AF37]/50 text-left flex items-center justify-between cursor-pointer"
+              >
+                <div>
+                  <span className="font-bold text-slate-100 block">Accompagnement VIP & Cohorte</span>
+                  <span className="text-zinc-400">{pendingCoachingCount} demande(s) en attente</span>
+                </div>
+                <HelpCircle className="w-5 h-5 text-[#D4AF37]" />
+              </button>
+
+              <button
+                onClick={() => setActiveTab('payments')}
+                className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 hover:border-[#D4AF37]/50 text-left flex items-center justify-between cursor-pointer"
+              >
+                <div>
+                  <span className="font-bold text-slate-100 block">Passerelle & Webhooks</span>
+                  <span className="text-zinc-400">
+                    {paymentConfig.serverConfigured ? 'Serveur prêt' : 'Mode Démo actif'} · {paymentEvents.length} événement(s)
+                  </span>
+                </div>
+                <CreditCard className="w-5 h-5 text-[#D4AF37]" />
+              </button>
+            </div>
+
+            {/* Real Sales Breakdown by Course */}
             <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4">
-              <h3 className="font-brand text-lg font-bold text-slate-100">Ventes par Formation</h3>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <h3 className="font-brand text-lg font-bold text-slate-100">
+                  Ventes Réelles par Formation
+                </h3>
+                <span className="text-[11px] text-zinc-400">
+                  Calculé exclusivement sur les paiements réels confirmés
+                </span>
+              </div>
               <div className="space-y-3">
                 {salesByCourse.map((item) => (
                   <div
@@ -531,7 +698,7 @@ export const AdminDashboard: React.FC = () => {
                   >
                     <span className="font-medium text-slate-200 truncate">{item.title}</span>
                     <div className="flex items-center gap-6 shrink-0 tabular-nums">
-                      <span className="text-zinc-400">{item.count} inscription(s)</span>
+                      <span className="text-zinc-400">{item.count} vente(s)</span>
                       <span className="font-mono font-bold text-[#D4AF37]">
                         {formatPrice(item.revenueXOF, 'XOF')}
                       </span>
@@ -543,19 +710,17 @@ export const AdminDashboard: React.FC = () => {
           </div>
         )}
 
-        {/* TAB 2: COURSES & CATEGORIES */}
+        {/* TAB 2: COURSES, PRICING, PROMOTIONS & CATEGORIES */}
         {activeTab === 'courses' && (
           <div className="space-y-10">
-            
-            {/* Courses List */}
             <div className="space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <h2 className="font-brand text-xl font-bold text-slate-100">
-                    Gestion des Formations & Contenus Pédagogiques
+                    Gestion des Formations, Tarifs & Promotions
                   </h2>
                   <p className="text-xs text-zinc-400">
-                    Créez des formations, modifiez les prix et organisez modules, leçons vidéo et supports.
+                    Modifiez les prix normaux ou activez une promotion sans toucher au code, et structurez modules, vidéos et supports.
                   </p>
                 </div>
 
@@ -575,6 +740,7 @@ export const AdminDashboard: React.FC = () => {
                       priceXOF: 75000,
                       priceEUR: 115,
                       priceUSD: 125,
+                      promoActive: false,
                       coverImage: '/src/assets/images/course_method_faith_ariola_1794341070404.jpg',
                       isFeatured: false,
                       isPublished: true,
@@ -586,7 +752,7 @@ export const AdminDashboard: React.FC = () => {
                     });
                     setShowCourseModal(true);
                   }}
-                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-md self-start"
+                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-md self-start min-h-[44px]"
                 >
                   <Plus className="w-4 h-4" />
                   <span>Nouvelle formation</span>
@@ -594,86 +760,104 @@ export const AdminDashboard: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {courses.map((c) => (
-                  <div
-                    key={c.id}
-                    className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 flex flex-col md:flex-row md:items-center justify-between gap-4"
-                  >
-                    <div className="flex items-center gap-4">
-                      <img
-                        src={c.coverImage}
-                        alt={c.title}
-                        className="w-20 h-14 rounded-lg object-cover border border-zinc-800 shrink-0"
-                      />
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-brand font-bold text-sm text-slate-100">{c.title}</span>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                              c.isPublished ? 'bg-emerald-950 text-emerald-300' : 'bg-zinc-800 text-zinc-400'
-                            }`}
-                          >
-                            {c.isPublished ? 'Publiée' : 'Dépubliée'}
-                          </span>
-                        </div>
-                        <p className="text-xs text-zinc-400 mt-0.5">
-                          {c.modules.length} modules · {c.modules.reduce((s, m) => s + m.lessons.length, 0)} leçons · Niveau : {c.level}
-                        </p>
-                        <div className="text-xs font-mono font-bold text-[#D4AF37] mt-1 tabular-nums">
-                          {c.priceXOF.toLocaleString('fr-FR')} FCFA · {c.priceEUR} € · ${c.priceUSD}
+                {courses.map((c) => {
+                  const pricing = getCoursePricing(c);
+                  return (
+                    <div
+                      key={c.id}
+                      className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                    >
+                      <div className="flex items-start sm:items-center gap-4">
+                        <img
+                          src={c.coverImage}
+                          alt={c.title}
+                          className="w-20 h-14 rounded-lg object-cover border border-zinc-800 shrink-0"
+                        />
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-brand font-bold text-sm text-slate-100">{c.title}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                c.isPublished ? 'bg-emerald-950 text-emerald-300' : 'bg-zinc-800 text-zinc-400'
+                              }`}
+                            >
+                              {c.isPublished ? 'Publiée' : 'Dépubliée'}
+                            </span>
+                            {c.isFeatured && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#D4AF37]/15 text-[#F3E5AB]">
+                                Accueil
+                              </span>
+                            )}
+                            {pricing.isPromo && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-700/60">
+                                Promo {pricing.discountPercent ? `-${pricing.discountPercent}%` : 'Active'}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-zinc-400 mt-0.5">
+                            {c.modules.length} modules · {c.modules.reduce((s, m) => s + m.lessons.length, 0)} leçons · Niveau : {c.level}
+                          </p>
+                          <div className="text-xs font-mono font-bold text-[#D4AF37] mt-1 tabular-nums flex flex-wrap items-center gap-2">
+                            <span>
+                              {pricing.activeXOF.toLocaleString('fr-FR')} FCFA · {pricing.activeEUR} € · ${pricing.activeUSD}
+                            </span>
+                            {pricing.crossedOutXOF && (
+                              <span className="text-[11px] text-zinc-500 line-through">
+                                {pricing.crossedOutXOF.toLocaleString('fr-FR')} FCFA
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-2 self-end md:self-center">
-                      <button
-                        onClick={() => {
-                          setEditingCourse(c);
-                          setShowCourseModal(true);
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 border border-zinc-700 flex items-center gap-1 cursor-pointer"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>Modifier / Programme</span>
-                      </button>
-                      <button
-                        onClick={() => {
-                          saveCourse({ ...c, isPublished: !c.isPublished });
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-300 border border-zinc-800 cursor-pointer"
-                      >
-                        {c.isPublished ? 'Dépublier' : 'Publier'}
-                      </button>
-                      {confirmDeleteKey === `course-${c.id}` ? (
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => {
-                              deleteCourse(c.id);
-                              setConfirmDeleteKey(null);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-red-600 text-white text-[11px] font-bold cursor-pointer"
-                          >
-                            Confirmer
-                          </button>
-                          <button
-                            onClick={() => setConfirmDeleteKey(null)}
-                            className="px-2 py-1.5 rounded-lg bg-zinc-800 text-zinc-300 text-[11px] cursor-pointer"
-                          >
-                            Annuler
-                          </button>
-                        </div>
-                      ) : (
+                      <div className="flex flex-wrap items-center gap-2 self-end lg:self-center">
                         <button
-                          onClick={() => setConfirmDeleteKey(`course-${c.id}`)}
-                          className="p-1.5 rounded-lg text-red-400 hover:bg-red-950/40 cursor-pointer"
-                          title="Supprimer"
+                          onClick={() => {
+                            setEditingCourse(c);
+                            setShowCourseModal(true);
+                          }}
+                          className="px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 border border-zinc-700 flex items-center gap-1 cursor-pointer min-h-[40px]"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Modifier / Tarifs / Programme</span>
                         </button>
-                      )}
+                        <button
+                          onClick={() => saveCourse({ ...c, isPublished: !c.isPublished })}
+                          className="px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-300 border border-zinc-800 cursor-pointer min-h-[40px]"
+                        >
+                          {c.isPublished ? 'Dépublier' : 'Publier'}
+                        </button>
+                        {confirmDeleteKey === `course-${c.id}` ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => {
+                                deleteCourse(c.id);
+                                setConfirmDeleteKey(null);
+                              }}
+                              className="px-2.5 py-2 rounded-lg bg-red-600 text-white text-[11px] font-bold cursor-pointer"
+                            >
+                              Confirmer
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteKey(null)}
+                              className="px-2.5 py-2 rounded-lg bg-zinc-800 text-zinc-300 text-[11px] cursor-pointer"
+                            >
+                              Annuler
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDeleteKey(`course-${c.id}`)}
+                            className="p-2 rounded-lg text-red-400 hover:bg-red-950/40 cursor-pointer"
+                            title="Supprimer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -694,12 +878,12 @@ export const AdminDashboard: React.FC = () => {
                   >
                     <div>
                       <span className="font-bold text-[#F3E5AB] block">
-                        {dom.code}. {dom.title}
+                        {dom.code}. {dom.title} ({dom.shortLabel})
                       </span>
                       <span className="text-zinc-400 text-[11px] block mt-0.5">{dom.description}</span>
                     </div>
-                    {domains.length > 1 && (
-                      confirmDeleteKey === `dom-${dom.id}` ? (
+                    {domains.length > 1 &&
+                      (confirmDeleteKey === `dom-${dom.id}` ? (
                         <div className="flex items-center gap-1 shrink-0">
                           <button
                             onClick={() => {
@@ -720,13 +904,12 @@ export const AdminDashboard: React.FC = () => {
                       ) : (
                         <button
                           onClick={() => setConfirmDeleteKey(`dom-${dom.id}`)}
-                          className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
+                          className="text-red-400 hover:text-red-300 p-1.5 cursor-pointer shrink-0"
                           title="Supprimer cette catégorie"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
-                      )
-                    )}
+                      ))}
                   </div>
                 ))}
               </div>
@@ -739,21 +922,21 @@ export const AdminDashboard: React.FC = () => {
                     value={newDomainTitle}
                     onChange={(e) => setNewDomainTitle(e.target.value)}
                     placeholder="Titre complet (ex: Design Graphique IA)"
-                    className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                    className="px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
                   />
                   <input
                     type="text"
                     value={newDomainShort}
                     onChange={(e) => setNewDomainShort(e.target.value)}
                     placeholder="Nom court filtre (ex: Design IA)"
-                    className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                    className="px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
                   />
                   <input
                     type="text"
                     value={newDomainDesc}
                     onChange={(e) => setNewDomainDesc(e.target.value)}
                     placeholder="Description courte"
-                    className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                    className="px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
                   />
                 </div>
                 <button
@@ -772,72 +955,87 @@ export const AdminDashboard: React.FC = () => {
                     setNewDomainShort('');
                     setNewDomainDesc('');
                   }}
-                  className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs cursor-pointer"
+                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs cursor-pointer min-h-[40px]"
                 >
                   Ajouter la catégorie
                 </button>
               </div>
             </div>
-
           </div>
         )}
 
         {/* TAB 3: STUDENTS MANAGEMENT */}
         {activeTab === 'students' && (
           <div className="space-y-6">
-            <div>
-              <h2 className="font-brand text-xl font-bold text-slate-100">Gestion des Apprenants</h2>
-              <p className="text-xs text-zinc-400">
-                Consultez les apprenants inscrits, leur progression et gérez leurs accès aux formations.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="font-brand text-xl font-bold text-slate-100">Gestion des Apprenants</h2>
+                <p className="text-xs text-zinc-400">
+                  Consultez les comptes apprenants, progression, devoirs, certificats et attribuez ou révoquez manuellement des accès.
+                </p>
+              </div>
+
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Rechercher nom, email, pays..."
+                  className="w-full pl-9 pr-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-slate-100 focus:outline-none focus:border-[#D4AF37]"
+                />
+              </div>
             </div>
 
             <div className="space-y-4">
-              {students.map((stu) => (
-                <div key={stu.id} className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4 text-xs">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
-                      <span className="font-brand font-bold text-base text-slate-100 block">{stu.name}</span>
-                      <span className="text-zinc-400">
-                        {stu.email} {stu.phone ? `· ${stu.phone}` : ''} {stu.country ? `· ${stu.country}` : ''}
-                      </span>
-                    </div>
-                    <div className="text-zinc-400 font-mono tabular-nums">
-                      {stu.completedLessonIds.length} leçon(s) terminée(s) · {stu.certificates.length} certificat(s)
-                    </div>
-                  </div>
-
-                  {/* Course access toggles */}
-                  <div className="pt-3 border-t border-zinc-900 space-y-2">
-                    <span className="text-[11px] text-zinc-400 font-semibold block">
-                      Accès aux formations :
-                    </span>
-                    <div className="flex flex-wrap gap-2">
-                      {courses.map((c) => {
-                        const enrolled = stu.enrolledCourseIds.includes(c.id);
-                        return (
-                          <button
-                            key={c.id}
-                            onClick={() =>
-                              enrolled
-                                ? revokeCourseAccess(stu.id, c.id)
-                                : grantManualCourseAccess(stu.id, c.id)
-                            }
-                            className={`px-3 py-1.5 rounded-lg border text-[11px] font-medium cursor-pointer transition-colors ${
-                              enrolled
-                                ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-300'
-                                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
-                            }`}
-                          >
-                            {enrolled ? '✓ ' : '+ '}
-                            {c.title.split(':')[0]}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+              {filteredStudents.length === 0 ? (
+                <div className="p-8 text-center rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400">
+                  Aucun apprenant ne correspond à votre recherche.
                 </div>
-              ))}
+              ) : (
+                filteredStudents.map((stu) => (
+                  <div key={stu.id} className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4 text-xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <span className="font-brand font-bold text-base text-slate-100 block">{stu.name}</span>
+                        <span className="text-zinc-400">
+                          {stu.email} {stu.phone ? `· ${stu.phone}` : ''} {stu.country ? `· ${stu.country}` : ''}
+                        </span>
+                      </div>
+                      <div className="text-zinc-400 font-mono tabular-nums text-[11px]">
+                        {stu.completedLessonIds.length} leçon(s) · {Object.keys(stu.submittedExercises || {}).length} devoir(s) · {Object.keys(stu.quizScores || {}).length} quiz · {stu.certificates.length} certificat(s)
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-zinc-900 space-y-2">
+                      <span className="text-[11px] text-zinc-400 font-semibold block">
+                        Accès manuels aux formations :
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {courses.map((c) => {
+                          const enrolled = stu.enrolledCourseIds.includes(c.id);
+                          return (
+                            <button
+                              key={c.id}
+                              onClick={() =>
+                                enrolled ? revokeCourseAccess(stu.id, c.id) : grantManualCourseAccess(stu.id, c.id)
+                              }
+                              className={`px-3 py-2 rounded-lg border text-[11px] font-medium cursor-pointer transition-colors min-h-[38px] ${
+                                enrolled
+                                  ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-300'
+                                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              {enrolled ? '✓ ' : '+ '}
+                              {c.title.split(':')[0]}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
@@ -846,18 +1044,25 @@ export const AdminDashboard: React.FC = () => {
         {activeTab === 'orders' && (
           <div className="space-y-8">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <h2 className="font-brand text-xl font-bold text-slate-100">
-                Commandes & Historique des Transactions
-              </h2>
+              <div>
+                <h2 className="font-brand text-xl font-bold text-slate-100">
+                  Commandes, Ventes Réelles & Codes Promo
+                </h2>
+                <p className="text-xs text-zinc-400">
+                  Les commandes marquées TEST DÉMO sont isolées des ventes réelles vérifiées.
+                </p>
+              </div>
               <select
                 value={orderStatusFilter}
                 onChange={(e) => setOrderStatusFilter(e.target.value)}
-                className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-slate-200 cursor-pointer"
+                className="px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-slate-200 cursor-pointer"
               >
-                <option value="all">Tous les statuts ({orders.length})</option>
-                <option value="confirmed">Paiements confirmés ({confirmedOrders.length})</option>
+                <option value="all">Toutes les commandes ({orders.length})</option>
+                <option value="real">Ventes réelles uniquement ({realOrders.length})</option>
+                <option value="demo">Tests Démo uniquement ({demoOrders.length})</option>
+                <option value="confirmed">Confirmées ({orders.filter((o) => o.status === 'confirmed').length})</option>
                 <option value="pending">En attente ({pendingOrders.length})</option>
-                <option value="failed">Échoués / Annulés ({failedOrders.length})</option>
+                <option value="failed">Échouées / Annulées ({failedOrders.length})</option>
               </select>
             </div>
 
@@ -886,87 +1091,96 @@ export const AdminDashboard: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-900">
-                    {filteredOrders.map((ord) => (
-                      <tr key={ord.id} className="hover:bg-zinc-900/40">
-                        <td className="p-4 font-mono font-bold text-[#F3E5AB]">
-                          {ord.reference}
-                          {ord.isDemoTransaction && (
-                            <span className="block text-[9px] text-amber-400">TEST DÉMO</span>
-                          )}
-                        </td>
-                        <td className="p-4 text-zinc-400 text-[11px]">
-                          {new Date(ord.createdAt).toLocaleDateString('fr-FR')}
-                        </td>
-                        <td className="p-4">
-                          <span className="font-bold text-slate-200 block">{ord.userName}</span>
-                          <span className="text-[10px] text-zinc-500">{ord.userEmail}</span>
-                        </td>
-                        <td className="p-4 text-zinc-300 max-w-[200px] truncate">{ord.courseTitle}</td>
-                        <td className="p-4 text-zinc-400">
-                          {ord.paymentMethod.toUpperCase()} ({ord.paymentProvider})
-                        </td>
-                        <td className="p-4 font-mono font-bold text-[#D4AF37] tabular-nums">
-                          {ord.amount.toLocaleString('fr-FR')} {ord.currency}
-                        </td>
-                        <td className="p-4">
-                          <select
-                            value={ord.status}
-                            onChange={(e) => updateOrderStatus(ord.id, e.target.value as any)}
-                            className="bg-zinc-900 border border-zinc-700 text-[11px] rounded px-2 py-1 text-slate-200 cursor-pointer"
-                          >
-                            <option value="confirmed">Confirmé (Payé)</option>
-                            <option value="pending">En attente</option>
-                            <option value="processing">En traitement</option>
-                            <option value="failed">Échoué</option>
-                            <option value="cancelled">Annulé</option>
-                            <option value="refunded">Remboursé</option>
-                          </select>
-                        </td>
-                        <td className="p-4">
-                          <div className="flex items-center gap-3">
-                            <button
-                              onClick={() => window.print()}
-                              className="text-xs text-[#D4AF37] hover:underline flex items-center gap-1 cursor-pointer"
-                            >
-                              <FileText className="w-3.5 h-3.5" />
-                              <span>Reçu</span>
-                            </button>
-
-                            {ord.status === 'confirmed' && (
-                              confirmRefundOrderId === ord.id ? (
-                                <div className="flex items-center gap-1">
-                                  <button
-                                    onClick={async () => {
-                                      const res = await refundOrderServer(ord.id);
-                                      setRefundNotice(res.message || 'Remboursement traité.');
-                                      setConfirmRefundOrderId(null);
-                                    }}
-                                    className="px-2 py-1 rounded bg-red-600 text-white text-[10px] font-bold cursor-pointer"
-                                  >
-                                    Confirmer
-                                  </button>
-                                  <button
-                                    onClick={() => setConfirmRefundOrderId(null)}
-                                    className="px-1.5 py-1 rounded bg-zinc-800 text-zinc-300 text-[10px] cursor-pointer"
-                                  >
-                                    Annuler
-                                  </button>
-                                </div>
-                              ) : (
-                                <button
-                                  onClick={() => setConfirmRefundOrderId(ord.id)}
-                                  className="text-[11px] text-red-400 hover:underline flex items-center gap-1 cursor-pointer"
-                                  title="Rembourser et révoquer l'accès"
-                                >
-                                  <RotateCcw className="w-3 h-3" />
-                                  <span>Rembourser</span>
-                                </button>
-                              )
-                            )}
-                          </div>
+                    {filteredOrders.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="p-8 text-center text-zinc-500">
+                          Aucune commande pour ce filtre.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      filteredOrders.map((ord) => (
+                        <tr key={ord.id} className="hover:bg-zinc-900/40">
+                          <td className="p-4 font-mono font-bold text-[#F3E5AB]">
+                            {ord.reference}
+                            {ord.isDemoTransaction ? (
+                              <span className="block text-[9px] text-amber-400 font-semibold">TEST DÉMO (NON PAYÉE)</span>
+                            ) : (
+                              <span className="block text-[9px] text-emerald-400 font-semibold">VENTE RÉELLE</span>
+                            )}
+                          </td>
+                          <td className="p-4 text-zinc-400 text-[11px] whitespace-nowrap">
+                            {new Date(ord.createdAt).toLocaleDateString('fr-FR')}
+                          </td>
+                          <td className="p-4">
+                            <span className="font-bold text-slate-200 block">{ord.userName}</span>
+                            <span className="text-[10px] text-zinc-500">{ord.userEmail}</span>
+                          </td>
+                          <td className="p-4 text-zinc-300 max-w-[200px] truncate">{ord.courseTitle}</td>
+                          <td className="p-4 text-zinc-400 whitespace-nowrap">
+                            {ord.paymentMethod.toUpperCase()} ({ord.paymentProvider})
+                          </td>
+                          <td className="p-4 font-mono font-bold text-[#D4AF37] tabular-nums whitespace-nowrap">
+                            {ord.amount.toLocaleString('fr-FR')} {ord.currency}
+                          </td>
+                          <td className="p-4">
+                            <select
+                              value={ord.status}
+                              onChange={(e) => updateOrderStatus(ord.id, e.target.value as any)}
+                              className="bg-zinc-900 border border-zinc-700 text-[11px] rounded px-2 py-1.5 text-slate-200 cursor-pointer"
+                            >
+                              <option value="confirmed">Confirmé (Activer accès)</option>
+                              <option value="pending">En attente</option>
+                              <option value="processing">En traitement</option>
+                              <option value="failed">Échoué</option>
+                              <option value="cancelled">Annulé</option>
+                              <option value="refunded">Remboursé</option>
+                            </select>
+                          </td>
+                          <td className="p-4">
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => window.print()}
+                                className="text-xs text-[#D4AF37] hover:underline flex items-center gap-1 cursor-pointer"
+                              >
+                                <FileText className="w-3.5 h-3.5" />
+                                <span>Reçu</span>
+                              </button>
+
+                              {ord.status === 'confirmed' &&
+                                (confirmRefundOrderId === ord.id ? (
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={async () => {
+                                        const res = await refundOrderServer(ord.id);
+                                        setRefundNotice(res.message || 'Remboursement traité.');
+                                        setConfirmRefundOrderId(null);
+                                      }}
+                                      className="px-2 py-1 rounded bg-red-600 text-white text-[10px] font-bold cursor-pointer"
+                                    >
+                                      Confirmer
+                                    </button>
+                                    <button
+                                      onClick={() => setConfirmRefundOrderId(null)}
+                                      className="px-1.5 py-1 rounded bg-zinc-800 text-zinc-300 text-[10px] cursor-pointer"
+                                    >
+                                      Annuler
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setConfirmRefundOrderId(ord.id)}
+                                    className="text-[11px] text-red-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                    title="Rembourser et révoquer l'accès"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Rembourser</span>
+                                  </button>
+                                ))}
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -992,13 +1206,13 @@ export const AdminDashboard: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => savePromoCode({ ...p, isActive: !p.isActive })}
-                        className="px-2 py-1 rounded bg-zinc-800 text-[11px] text-zinc-300 cursor-pointer"
+                        className="px-2.5 py-1.5 rounded bg-zinc-800 text-[11px] text-zinc-300 cursor-pointer"
                       >
                         {p.isActive ? 'Désactiver' : 'Activer'}
                       </button>
                       <button
                         onClick={() => deletePromoCode(p.id)}
-                        className="text-red-400 p-1 cursor-pointer"
+                        className="text-red-400 p-1.5 cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1013,7 +1227,7 @@ export const AdminDashboard: React.FC = () => {
                   value={newPromoCode}
                   onChange={(e) => setNewPromoCode(e.target.value.toUpperCase())}
                   placeholder="Nouveau code (ex: PROMO20)"
-                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 uppercase font-mono"
+                  className="px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 uppercase font-mono"
                 />
                 <input
                   type="number"
@@ -1021,7 +1235,7 @@ export const AdminDashboard: React.FC = () => {
                   max={90}
                   value={newPromoPercent}
                   onChange={(e) => setNewPromoPercent(Number(e.target.value))}
-                  className="w-24 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  className="w-24 px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
                 />
                 <span className="text-zinc-400">% de réduction</span>
                 <button
@@ -1035,7 +1249,7 @@ export const AdminDashboard: React.FC = () => {
                     });
                     setNewPromoCode('');
                   }}
-                  className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer"
+                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer min-h-[40px]"
                 >
                   Créer le code promo
                 </button>
@@ -1047,24 +1261,33 @@ export const AdminDashboard: React.FC = () => {
         {/* TAB 5: COACHING & PRICING */}
         {activeTab === 'coaching' && (
           <div className="space-y-8">
-            {/* Edit coaching prices */}
             <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4">
               <h2 className="font-brand text-lg font-bold text-slate-100">
-                Tarifs des Programmes d’Accompagnement (sans modifier le code)
+                Formules & Tarifs d’Accompagnement (1-sur-1 & Bootcamps)
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 {coachingPrograms.map((prog) => (
                   <div key={prog.id} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-3">
-                    <span className="font-bold text-[#F3E5AB] block">{prog.title}</span>
+                    <input
+                      type="text"
+                      value={prog.title}
+                      onChange={(e) => saveCoachingProgram({ ...prog, title: e.target.value })}
+                      className="w-full px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-700 font-bold text-[#F3E5AB]"
+                    />
+                    <input
+                      type="text"
+                      value={prog.duration}
+                      onChange={(e) => saveCoachingProgram({ ...prog, duration: e.target.value })}
+                      placeholder="Durée de la formule"
+                      className="w-full px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-zinc-300"
+                    />
                     <div className="grid grid-cols-3 gap-2">
                       <div>
                         <label className="text-zinc-400 block mb-1">FCFA</label>
                         <input
                           type="number"
                           value={prog.priceXOF}
-                          onChange={(e) =>
-                            saveCoachingProgram({ ...prog, priceXOF: Number(e.target.value) })
-                          }
+                          onChange={(e) => saveCoachingProgram({ ...prog, priceXOF: Number(e.target.value) })}
                           className="w-full px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-700 text-slate-100"
                         />
                       </div>
@@ -1073,9 +1296,7 @@ export const AdminDashboard: React.FC = () => {
                         <input
                           type="number"
                           value={prog.priceEUR}
-                          onChange={(e) =>
-                            saveCoachingProgram({ ...prog, priceEUR: Number(e.target.value) })
-                          }
+                          onChange={(e) => saveCoachingProgram({ ...prog, priceEUR: Number(e.target.value) })}
                           className="w-full px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-700 text-slate-100"
                         />
                       </div>
@@ -1084,9 +1305,7 @@ export const AdminDashboard: React.FC = () => {
                         <input
                           type="number"
                           value={prog.priceUSD}
-                          onChange={(e) =>
-                            saveCoachingProgram({ ...prog, priceUSD: Number(e.target.value) })
-                          }
+                          onChange={(e) => saveCoachingProgram({ ...prog, priceUSD: Number(e.target.value) })}
                           className="w-full px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-700 text-slate-100"
                         />
                       </div>
@@ -1097,307 +1316,269 @@ export const AdminDashboard: React.FC = () => {
             </div>
 
             <h2 className="font-brand text-xl font-bold text-slate-100">
-              Demandes d’Accompagnement Reçues
+              Demandes d’Accompagnement Reçues ({coachingRequests.length})
             </h2>
             <div className="space-y-4">
-              {coachingRequests.map((req) => (
-                <div key={req.id} className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4 text-xs">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <span className="text-[10px] uppercase tracking-wider text-[#D4AF37] font-semibold block">
-                        {req.type === 'individual' ? 'Accompagnement Individuel VIP' : 'Accompagnement Collectif'}
-                      </span>
-                      <h3 className="font-brand text-base font-bold text-slate-100">
-                        {req.userName} ({req.userEmail} · {req.userPhone})
-                      </h3>
+              {coachingRequests.length === 0 ? (
+                <div className="p-8 text-center rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400">
+                  Aucune demande d’accompagnement reçue pour le moment.
+                </div>
+              ) : (
+                coachingRequests.map((req) => (
+                  <div key={req.id} className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4 text-xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-[#D4AF37] font-semibold block">
+                          {req.type === 'individual' ? 'Accompagnement Individuel VIP' : 'Accompagnement Collectif'} · {req.programTitle}
+                        </span>
+                        <h3 className="font-brand text-base font-bold text-slate-100">
+                          {req.userName} ({req.userEmail} · {req.userPhone})
+                        </h3>
+                      </div>
+
+                      <select
+                        value={req.status}
+                        onChange={(e) => updateCoachingStatus(req.id, e.target.value as any)}
+                        className="bg-zinc-900 border border-zinc-700 text-xs rounded-lg px-3 py-2 text-slate-200 cursor-pointer"
+                      >
+                        <option value="pending">En attente de validation</option>
+                        <option value="validated">Validé & Confirmé</option>
+                        <option value="scheduled">Rendez-vous planifié</option>
+                        <option value="completed">Session terminée</option>
+                        <option value="cancelled">Annulé</option>
+                      </select>
                     </div>
 
-                    <select
-                      value={req.status}
-                      onChange={(e) => updateCoachingStatus(req.id, e.target.value as any)}
-                      className="bg-zinc-900 border border-zinc-700 text-xs rounded-lg px-3 py-1.5 text-slate-200 cursor-pointer"
-                    >
-                      <option value="pending">En attente de validation</option>
-                      <option value="validated">Validé & Confirmé</option>
-                      <option value="scheduled">Rendez-vous planifié</option>
-                      <option value="completed">Session terminée</option>
-                      <option value="cancelled">Annulé</option>
-                    </select>
-                  </div>
+                    <p className="text-zinc-300 bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                      <strong>Besoin :</strong> {req.needDescription}
+                    </p>
 
-                  <p className="text-zinc-300 bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                    <strong>Besoin :</strong> {req.needDescription}
-                  </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-zinc-900">
+                      <div>
+                        <label className="text-[11px] text-zinc-400 block mb-1">
+                          Date souhaitée : <strong className="text-slate-200">{req.preferredDate}</strong> · Lien visio
+                        </label>
+                        <input
+                          type="url"
+                          defaultValue={req.meetingLink || ''}
+                          placeholder="Lien Google Meet / Zoom..."
+                          onBlur={(e) => {
+                            if (e.target.value !== (req.meetingLink || '')) {
+                              updateCoachingStatus(req.id, req.status, e.target.value);
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100"
+                        />
+                      </div>
 
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-zinc-900 text-zinc-400">
-                    <span>Date souhaitée : <strong>{req.preferredDate}</strong></span>
-                    <input
-                      type="url"
-                      defaultValue={req.meetingLink || ''}
-                      placeholder="Lien visio (Google Meet / Zoom)..."
-                      onBlur={(e) => {
-                        if (e.target.value !== req.meetingLink) {
-                          updateCoachingStatus(req.id, req.status, e.target.value);
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100 w-full sm:w-72"
-                    />
+                      <div>
+                        <label className="text-[11px] text-zinc-400 block mb-1">Notes internes Direction</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={coachNoteDrafts[req.id] ?? req.adminNotes ?? ''}
+                            onChange={(e) =>
+                              setCoachNoteDrafts((prev) => ({ ...prev, [req.id]: e.target.value }))
+                            }
+                            placeholder="Observations privées Faith Ariola..."
+                            className="flex-1 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateCoachingStatus(
+                                req.id,
+                                req.status,
+                                req.meetingLink,
+                                coachNoteDrafts[req.id] ?? req.adminNotes ?? ''
+                              )
+                            }
+                            className="px-3 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-[11px] cursor-pointer shrink-0"
+                          >
+                            Enregistrer
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         )}
 
-        {/* TAB 6: SITE LOGO, PAYMENTS STATUS, TESTIMONIALS */}
-        {activeTab === 'settings' && (
-          <div className="space-y-8">
-            
-            {/* 0. Infrastructure Cloud Supabase & Déploiement */}
-            <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-2.5">
-                  <Database className="w-5 h-5 text-[#D4AF37]" />
-                  <div>
-                    <h2 className="font-brand text-xl font-bold text-slate-100">
-                      Infrastructure Cloud Supabase, Stockage & Déploiement
-                    </h2>
-                    <p className="text-xs text-zinc-400 mt-0.5">
-                      État réel de connexion détecté par le serveur DJIFFA ACADEMY.
-                    </p>
-                  </div>
-                </div>
+        {/* TAB 6: CONTACT MESSAGES */}
+        {activeTab === 'messages' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="font-brand text-xl font-bold text-slate-100">
+                  Messages & Demandes de Contact ({contactMessages.length})
+                </h2>
+                <p className="text-xs text-zinc-400">
+                  Consultez les messages envoyés depuis la page Contact, annotez-les et répondez directement.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={messageFilter}
+                  onChange={(e) => setMessageFilter(e.target.value as any)}
+                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-slate-200 cursor-pointer"
+                >
+                  <option value="all">Tous ({contactMessages.length})</option>
+                  <option value="new">Non lus ({unreadMessagesCount})</option>
+                  <option value="read">Lus</option>
+                  <option value="replied">Répondus</option>
+                  <option value="archived">Archivés</option>
+                </select>
                 <button
                   type="button"
-                  onClick={refreshServerPaymentStatus}
-                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer self-start"
+                  onClick={refreshAdminTelemetry}
+                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Vérifier l’état</span>
+                  <span>Actualiser</span>
                 </button>
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
-                  <span className="text-zinc-400 block">Base PostgreSQL & Auth Supabase</span>
-                  <strong className={infraStatus?.supabase.configured ? 'text-emerald-400' : 'text-amber-300'}>
-                    {infraStatus?.supabase.configured
-                      ? '✓ Connecté (Serveur + Navigateur)'
-                      : 'Non configuré (Mode Local actif)'}
-                  </strong>
-                  <p className="text-[11px] text-zinc-500">
-                    Variables requises : VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
-                  <span className="text-zinc-400 block">Stockage Vidéos & PDF Privés</span>
-                  <strong className={infraStatus?.supabase.serverConnected ? 'text-emerald-400' : 'text-zinc-300'}>
-                    {infraStatus?.supabase.serverConnected
-                      ? '✓ Buckets actifs (URL signées)'
-                      : 'Liens externes actifs / Storage prêt'}
-                  </strong>
-                  <p className="text-[11px] text-zinc-500">
-                    Buckets : brand-assets, course-pdfs, course-videos (+ Bunny/Cloudflare/Vimeo)
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
-                  <span className="text-zinc-400 block">Sécurité Espace Direction</span>
-                  <strong className={infraStatus?.adminSecurity.customCodeConfigured ? 'text-emerald-400' : 'text-amber-300'}>
-                    {infraStatus?.adminSecurity.customCodeConfigured
-                      ? '✓ Code secret personnalisé actif'
-                      : 'Mode démo (DJIFFA-ADMIN)'}
-                  </strong>
-                  <p className="text-[11px] text-zinc-500">
-                    Définissez ADMIN_ACCESS_CODE et ADMIN_SESSION_SECRET en production.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const meta = createPreMigrationBackup({
-                      domains,
-                      courses,
-                      promoCodes,
-                      coachingPrograms,
-                      testimonials,
-                      siteSettings,
-                      students,
-                      orders,
-                      coachingRequests
-                    });
-                    setMigrationFeedback({
-                      ok: true,
-                      message: `✓ Sauvegarde locale téléchargée (${meta.fileName}). Vous pouvez maintenant vérifier la connexion ou migrer sans écrasement.`
-                    });
-                  }}
-                  className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-slate-100 font-semibold text-xs flex items-center gap-2 cursor-pointer"
-                >
-                  <FileText className="w-4 h-4 text-[#D4AF37]" />
-                  <span>Préparer une sauvegarde (.json)</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={migratingCloud || !infraStatus?.supabase.serverConnected}
-                  onClick={async () => {
-                    if (!loadStoredBackupMeta()) {
-                      setMigrationFeedback({
-                        ok: false,
-                        message: 'Préparez d’abord une sauvegarde JSON locale avant de lancer la migration vers Supabase.'
-                      });
-                      return;
-                    }
-                    setMigratingCloud(true);
-                    setMigrationFeedback(null);
-                    try {
-                      const res = await migrateLocalCatalogToCloud();
-                      setMigrationFeedback(res);
-                    } finally {
-                      setMigratingCloud(false);
-                    }
-                  }}
-                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <UploadCloud className="w-4 h-4" />
-                  <span>{migratingCloud ? 'Migration en cours...' : 'Migrer mes données locales vers Supabase'}</span>
-                </button>
-
-                {infraStatus?.supabase.serverConnected && (
-                  <button
-                    type="button"
-                    onClick={refreshSupabaseAdminData}
-                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Synchroniser apprenants & commandes Supabase</span>
-                  </button>
-                )}
-              </div>
-
-              {migrationFeedback && (
-                <div
-                  className={`p-3 rounded-lg text-xs border ${
-                    migrationFeedback.ok
-                      ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
-                      : 'bg-red-950/60 border-red-800 text-red-200'
-                  }`}
-                >
-                  {migrationFeedback.message}
-                </div>
-              )}
             </div>
 
-            {/* 1. Official Logo Import & Contact Info */}
-            <form onSubmit={handleSaveSettings} className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-6">
-              <div className="flex items-center gap-2">
-                <ImageIcon className="w-5 h-5 text-[#D4AF37]" />
-                <h2 className="font-brand text-xl font-bold text-slate-100">
-                  Logo Officiel DJIFFA DESIGN AGENCY & Coordonnées
-                </h2>
+            {filteredMessages.length === 0 ? (
+              <div className="p-10 text-center rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
+                <Mail className="w-8 h-8 text-zinc-600 mx-auto" />
+                <p className="text-xs text-zinc-400">Aucun message reçu pour ce filtre.</p>
               </div>
+            ) : (
+              <div className="space-y-4">
+                {filteredMessages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`p-5 rounded-2xl bg-zinc-950 border space-y-4 text-xs ${
+                      msg.status === 'new' ? 'border-[#D4AF37]/60' : 'border-zinc-800'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-brand text-base font-bold text-slate-100">{msg.name}</span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              msg.status === 'new'
+                                ? 'bg-[#D4AF37]/20 text-[#F3E5AB] border border-[#D4AF37]/50'
+                                : msg.status === 'replied'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                                : 'bg-zinc-900 text-zinc-400 border border-zinc-700'
+                            }`}
+                          >
+                            {msg.status === 'new'
+                              ? 'Nouveau'
+                              : msg.status === 'read'
+                              ? 'Lu'
+                              : msg.status === 'replied'
+                              ? 'Répondu'
+                              : 'Archivé'}
+                          </span>
+                        </div>
+                        <span className="text-zinc-400 block mt-0.5">
+                          {msg.email} {msg.phone ? `· ${msg.phone}` : ''} ·{' '}
+                          {new Date(msg.createdAt).toLocaleString('fr-FR')}
+                        </span>
+                      </div>
 
-              <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row items-center gap-6">
-                <div className="w-24 h-24 rounded-xl bg-zinc-950 border border-[#D4AF37]/40 flex items-center justify-center overflow-hidden shrink-0">
-                  {settingsForm.agencyLogoDataUrl ? (
-                    <img
-                      src={settingsForm.agencyLogoDataUrl}
-                      alt="Logo DJIFFA DESIGN AGENCY"
-                      className="w-full h-full object-contain p-2"
-                    />
-                  ) : (
-                    <span className="font-brand text-3xl font-bold text-[#D4AF37]">D</span>
-                  )}
-                </div>
-                <div className="space-y-2 text-xs">
-                  <span className="font-semibold text-slate-200 block">
-                    Importer le logo officiel de DJIFFA DESIGN AGENCY
-                  </span>
-                  <p className="text-zinc-400">
-                    Formats recommandés : PNG transparent, SVG ou JPG. Il apparaîtra dans la barre supérieure, le pied de page et les certificats.
-                  </p>
-                  <div className="flex flex-wrap items-center gap-3 pt-1">
-                    <label className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer">
-                      Choisir un fichier logo
-                      <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
-                    </label>
-                    {settingsForm.agencyLogoDataUrl && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const updated = { ...settingsForm, agencyLogoDataUrl: null };
-                          setSettingsForm(updated);
-                          updateSiteSettings(updated);
-                        }}
-                        className="px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 cursor-pointer"
+                      <select
+                        value={msg.status}
+                        onChange={(e) =>
+                          updateContactMessageStatus(msg.id, e.target.value as ContactMessage['status'])
+                        }
+                        className="bg-zinc-900 border border-zinc-700 text-xs rounded-lg px-3 py-2 text-slate-200 cursor-pointer"
                       >
-                        Réinitialiser
-                      </button>
-                    )}
+                        <option value="new">Nouveau</option>
+                        <option value="read">Marquer comme lu</option>
+                        <option value="replied">Répondu</option>
+                        <option value="archived">Archivé</option>
+                      </select>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1.5">
+                      <span className="text-[11px] font-semibold text-[#D4AF37] block">
+                        Objet : {msg.subject}
+                      </span>
+                      <p className="text-zinc-200 whitespace-pre-line leading-relaxed">{msg.message}</p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-zinc-900">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <a
+                          href={`mailto:${msg.email}?subject=${encodeURIComponent(`Re: ${msg.subject} — ${siteSettings.academyName}`)}`}
+                          onClick={() => updateContactMessageStatus(msg.id, 'replied')}
+                          className="px-3 py-1.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-[11px] inline-flex items-center gap-1.5"
+                        >
+                          <Mail className="w-3.5 h-3.5" />
+                          <span>Répondre par Email</span>
+                        </a>
+                        {msg.phone && (
+                          <a
+                            href={`https://wa.me/${msg.phone.replace(/[^0-9]/g, '')}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-200 font-semibold text-[11px] inline-flex items-center gap-1.5"
+                          >
+                            <span>WhatsApp</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
+                      </div>
+
+                      <div className="flex gap-2 flex-1 sm:max-w-sm">
+                        <input
+                          type="text"
+                          value={msgNoteDrafts[msg.id] ?? msg.adminNotes ?? ''}
+                          onChange={(e) =>
+                            setMsgNoteDrafts((prev) => ({ ...prev, [msg.id]: e.target.value }))
+                          }
+                          placeholder="Note interne Direction..."
+                          className="flex-1 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateContactMessageStatus(
+                              msg.id,
+                              msg.status,
+                              msgNoteDrafts[msg.id] ?? msg.adminNotes ?? ''
+                            )
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold cursor-pointer"
+                        >
+                          Sauver
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ))}
               </div>
+            )}
+          </div>
+        )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
-                <div>
-                  <label className="text-zinc-400 block mb-1">Email de contact officiel</label>
-                  <input
-                    type="email"
-                    value={settingsForm.contactEmail}
-                    onChange={(e) => setSettingsForm({ ...settingsForm, contactEmail: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Téléphone / WhatsApp Direction</label>
-                  <input
-                    type="text"
-                    value={settingsForm.contactPhone}
-                    onChange={(e) => setSettingsForm({ ...settingsForm, contactPhone: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Siège</label>
-                  <input
-                    type="text"
-                    value={settingsForm.headquarters}
-                    onChange={(e) => setSettingsForm({ ...settingsForm, headquarters: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
-                </div>
-              </div>
-
-              {settingsSaved && (
-                <p className="text-xs text-emerald-400 font-medium">✓ Paramètres du site enregistrés.</p>
-              )}
-
-              <button
-                type="submit"
-                className="px-5 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs cursor-pointer"
-              >
-                Enregistrer les coordonnées
-              </button>
-            </form>
-
-            {/* 2. Server Payment Gateway Status (Keys kept strictly server-side) */}
+        {/* TAB 7: PAYMENTS & LIVE NOTIFICATIONS / WEBHOOKS */}
+        {activeTab === 'payments' && (
+          <div className="space-y-8">
             <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-5">
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <h2 className="font-brand text-xl font-bold text-slate-100">
-                    Système de Paiement Sécurisé (Côté Serveur)
+                    Passerelles de Paiement & Webhooks (Côté Serveur)
                   </h2>
                   <p className="text-xs text-zinc-400 mt-1">
-                    Par sécurité, les clés secrètes FedaPay / KKiaPay / CinetPay ne sont jamais stockées dans le navigateur. Elles se configurent dans les variables d’environnement du serveur.
+                    MTN Mobile Money, Moov Money, Visa et Mastercard via FedaPay, KKiaPay ou CinetPay. Les clés secrètes restent strictement sur le serveur.
                   </p>
                 </div>
                 <button
-                  onClick={refreshServerPaymentStatus}
-                  className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer shrink-0"
+                  onClick={() => {
+                    refreshServerPaymentStatus();
+                    refreshAdminTelemetry();
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer self-start"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>Actualiser</span>
@@ -1419,27 +1600,337 @@ export const AdminDashboard: React.FC = () => {
                 <div className="space-y-1">
                   <strong className="block">{paymentConfig.serverMessage}</strong>
                   <span className="text-zinc-400 block">
-                    Prestataire sélectionné côté serveur : <strong className="text-white">{paymentConfig.activeProvider.toUpperCase()}</strong> · Mode : <strong className="text-white">{paymentConfig.isTestMode ? 'Sandbox' : 'Live'}</strong>
+                    Prestataire sélectionné : <strong className="text-white">{paymentConfig.activeProvider.toUpperCase()}</strong> · Mode : <strong className="text-white">{paymentConfig.isTestMode ? 'Sandbox / Test' : 'Production Live'}</strong>
                   </span>
                 </div>
               </div>
 
-              <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 text-xs text-zinc-300 space-y-2">
-                <strong className="text-[#F3E5AB] block">
-                  Recommandation économique pour démarrer au Bénin et à l’international : FedaPay
-                </strong>
-                <p className="text-zinc-400 leading-relaxed">
-                  <strong>FedaPay</strong> est adapté au démarrage sans abonnement mensuel fixe (commission uniquement à la transaction) et prend en charge <strong>MTN Mobile Money Bénin, Moov Money Bénin, Visa et Mastercard</strong>.
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                {[
+                  { name: 'MTN Mobile Money', desc: 'Bénin & Afrique de l’Ouest' },
+                  { name: 'Moov Money', desc: 'Bénin & UEMOA' },
+                  { name: 'Carte Visa', desc: 'Paiement international' },
+                  { name: 'Mastercard', desc: 'Paiement international' }
+                ].map((m) => (
+                  <div key={m.name} className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-1">
+                    <span className="font-bold text-slate-100 block">{m.name}</span>
+                    <span className="text-[11px] text-zinc-400 block">{m.desc}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-3 text-xs">
+                <span className="font-semibold text-[#F3E5AB] block">
+                  URL Webhook à renseigner chez votre prestataire ({paymentConfig.activeProvider.toUpperCase()})
+                </span>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <code className="flex-1 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-200 font-mono text-[11px] break-all">
+                    {webhookUrl}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={copyWebhookUrl}
+                    className="px-3.5 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                  >
+                    {copiedWebhook ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedWebhook ? 'Copié' : 'Copier l’URL'}</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Variables serveur requises sur Render : <code className="text-zinc-200">PAYMENT_PROVIDER</code>, <code className="text-zinc-200">PAYMENT_MODE</code> (<code className="text-zinc-200">sandbox</code> ou <code className="text-zinc-200">live</code>) et les clés du prestataire (<code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code> ou équivalent KKiaPay/CinetPay).
                 </p>
-                <ol className="list-decimal pl-5 space-y-1 text-zinc-400">
-                  <li>Ouvrez votre compte marchand sur <strong>fedapay.com</strong> (ou <strong>kkiapay.me</strong> / <strong>cinetpay.com</strong>).</li>
-                  <li>Ajoutez vos clés dans les variables d’environnement du serveur : <code className="text-zinc-200">PAYMENT_PROVIDER=fedapay</code>, <code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, et <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code>.</li>
-                  <li>Configurez l’URL Webhook sur votre compte prestataire vers : <code className="text-zinc-200">{window.location.origin}/api/payments/webhook</code>.</li>
-                </ol>
               </div>
             </div>
 
-            {/* 3. Real Testimonials Management */}
+            {/* Live Server Payment Events & Notifications */}
+            <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Bell className="w-5 h-5 text-[#D4AF37]" />
+                  <h3 className="font-brand text-lg font-bold text-slate-100">
+                    Journal des Événements Paiements & Webhooks ({paymentEvents.length})
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshAdminTelemetry}
+                  className="text-xs text-[#D4AF37] hover:underline cursor-pointer"
+                >
+                  Actualiser le flux
+                </button>
+              </div>
+
+              {paymentEvents.length === 0 ? (
+                <p className="text-xs text-zinc-400">
+                  Aucun événement serveur récent (sessions créées, vérifications, webhooks ou remboursements) depuis le démarrage du serveur.
+                </p>
+              ) : (
+                <div className="space-y-2.5">
+                  {paymentEvents.map((evt) => (
+                    <div
+                      key={evt.id}
+                      className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono font-bold text-[#F3E5AB]">{evt.reference || 'N/A'}</span>
+                          <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                            {evt.provider} · {evt.event}
+                          </span>
+                          <span className="text-[10px] uppercase text-[#D4AF37] font-semibold">
+                            {evt.status}
+                          </span>
+                        </div>
+                        <p className="text-zinc-300">{evt.detail}</p>
+                      </div>
+                      <span className="text-[11px] font-mono text-zinc-500 shrink-0">
+                        {new Date(evt.receivedAt).toLocaleString('fr-FR')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 8: SITE IDENTITY, LOGO, LEGAL TEXTS & VERIFIED TESTIMONIALS */}
+        {activeTab === 'identity' && (
+          <div className="space-y-8">
+            <form onSubmit={handleSaveSettings} className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-6">
+              <div className="flex items-center gap-2">
+                <ImageIcon className="w-5 h-5 text-[#D4AF37]" />
+                <h2 className="font-brand text-xl font-bold text-slate-100">
+                  Identité de Marque, Logo, Coordonnées & Textes Légaux
+                </h2>
+              </div>
+
+              {/* Official Logo */}
+              <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row items-center gap-6">
+                <div className="w-24 h-24 rounded-xl bg-zinc-950 border border-[#D4AF37]/40 flex items-center justify-center overflow-hidden shrink-0">
+                  {settingsForm.agencyLogoDataUrl ? (
+                    <img
+                      src={settingsForm.agencyLogoDataUrl}
+                      alt={settingsForm.parentAgencyName}
+                      className="w-full h-full object-contain p-2"
+                    />
+                  ) : (
+                    <span className="font-brand text-3xl font-bold text-[#D4AF37]">D</span>
+                  )}
+                </div>
+                <div className="space-y-2 text-xs">
+                  <span className="font-semibold text-slate-200 block">
+                    Logo officiel de l’Académie / Maison mère
+                  </span>
+                  <p className="text-zinc-400">
+                    Formats recommandés : PNG transparent, SVG ou JPG. Affiché dans la barre supérieure, le pied de page et les certificats.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <label className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer">
+                      Importer un logo
+                      <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
+                    </label>
+                    {settingsForm.agencyLogoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = { ...settingsForm, agencyLogoDataUrl: null };
+                          setSettingsForm(updated);
+                          updateSiteSettings(updated);
+                        }}
+                        className="px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 cursor-pointer"
+                      >
+                        Réinitialiser
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Brand & Director Identity */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Nom de l’académie</label>
+                  <input
+                    type="text"
+                    value={settingsForm.academyName}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, academyName: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Maison mère</label>
+                  <input
+                    type="text"
+                    value={settingsForm.parentAgencyName}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, parentAgencyName: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Fondatrice & Directrice</label>
+                  <input
+                    type="text"
+                    value={settingsForm.directorName}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, directorName: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {/* Presentations & Bio */}
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Présentation de l’académie (Accueil & Pied de page)</label>
+                  <textarea
+                    rows={2}
+                    value={settingsForm.academyPresentation}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, academyPresentation: e.target.value })}
+                    className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Présentation de la maison mère (À propos)</label>
+                  <textarea
+                    rows={2}
+                    value={settingsForm.parentAgencyPresentation}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, parentAgencyPresentation: e.target.value })
+                    }
+                    className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Biographie de la Directrice</label>
+                  <textarea
+                    rows={2}
+                    value={settingsForm.directorBio}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, directorBio: e.target.value })}
+                    className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {/* Coordinates */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Email de contact officiel</label>
+                  <input
+                    type="email"
+                    value={settingsForm.contactEmail}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, contactEmail: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Téléphone Direction</label>
+                  <input
+                    type="text"
+                    value={settingsForm.contactPhone}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, contactPhone: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Numéro WhatsApp</label>
+                  <input
+                    type="text"
+                    value={settingsForm.whatsappNumber}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, whatsappNumber: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Adresse / Siège</label>
+                  <input
+                    type="text"
+                    value={settingsForm.headquarters}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, headquarters: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-zinc-400 block mb-1">Horaires de permanence</label>
+                  <input
+                    type="text"
+                    value={settingsForm.supportHours}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, supportHours: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {/* Social Links */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Lien Instagram (optionnel)</label>
+                  <input
+                    type="url"
+                    value={settingsForm.instagramUrl || ''}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, instagramUrl: e.target.value })}
+                    placeholder="https://instagram.com/..."
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Lien LinkedIn (optionnel)</label>
+                  <input
+                    type="url"
+                    value={settingsForm.linkedinUrl || ''}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, linkedinUrl: e.target.value })}
+                    placeholder="https://linkedin.com/..."
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Lien YouTube (optionnel)</label>
+                  <input
+                    type="url"
+                    value={settingsForm.youtubeUrl || ''}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, youtubeUrl: e.target.value })}
+                    placeholder="https://youtube.com/..."
+                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {/* Legal Texts */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Mentions Légales</label>
+                  <textarea
+                    rows={5}
+                    value={settingsForm.legalNotices}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, legalNotices: e.target.value })}
+                    className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Conditions Générales de Vente (CGV)</label>
+                  <textarea
+                    rows={5}
+                    value={settingsForm.termsOfSale}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, termsOfSale: e.target.value })}
+                    className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {settingsSaved && (
+                <p className="text-xs text-emerald-400 font-medium">
+                  ✓ Identité, coordonnées et textes légaux enregistrés et synchronisés sur le site.
+                </p>
+              )}
+
+              <button
+                type="submit"
+                className="px-6 py-3 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs cursor-pointer min-h-[44px]"
+              >
+                Enregistrer toute l’identité et les textes légaux
+              </button>
+            </form>
+
+            {/* Verified Testimonials Manager */}
             <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-5">
               <div className="flex items-center gap-2">
                 <MessageSquareQuote className="w-5 h-5 text-[#D4AF37]" />
@@ -1448,7 +1939,7 @@ export const AdminDashboard: React.FC = () => {
                 </h2>
               </div>
               <p className="text-xs text-zinc-400">
-                Conformément à votre charte d’authenticité, aucun témoignage fictif n’est affiché. La section Témoignages apparaîtra sur le site public uniquement lorsque vous publierez ici de vrais retours vérifiés.
+                Aucun témoignage fictif n’est affiché. Seuls les avis réels publiés ici apparaissent sur la page d’accueil.
               </p>
 
               {testimonials.length > 0 && (
@@ -1457,7 +1948,7 @@ export const AdminDashboard: React.FC = () => {
                     <div key={t.id} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 text-xs space-y-2">
                       <div className="flex items-center justify-between">
                         <strong className="text-[#F3E5AB]">{t.authorName} · {t.authorRole}</strong>
-                        <button onClick={() => deleteTestimonial(t.id)} className="text-red-400 cursor-pointer">
+                        <button onClick={() => deleteTestimonial(t.id)} className="text-red-400 cursor-pointer p-1">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
@@ -1512,26 +2003,125 @@ export const AdminDashboard: React.FC = () => {
                   setTestRole('');
                   setTestQuote('');
                 }}
-                className="px-4 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs cursor-pointer"
+                className="px-4 py-2.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-xs cursor-pointer"
               >
                 Publier ce témoignage vérifié
               </button>
             </div>
+          </div>
+        )}
 
+        {/* TAB 9: LAUNCH CENTER & SUPABASE BACKUP/SYNC */}
+        {activeTab === 'launch-center' && (
+          <div className="space-y-8">
+            <LaunchCenter
+              onNavigateAdminTab={(tab) => setActiveTab(tab === 'settings' ? 'payments' : tab)}
+            />
+
+            {/* Cloud Backup & Non-Destructive Sync Tools */}
+            <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-5">
+              <div className="flex items-center gap-2.5">
+                <Database className="w-5 h-5 text-[#D4AF37]" />
+                <div>
+                  <h2 className="font-brand text-xl font-bold text-slate-100">
+                    Sauvegarde Locale (.json) & Synchronisation Supabase
+                  </h2>
+                  <p className="text-xs text-zinc-400">
+                    Exportez votre catalogue complet avant toute opération cloud et synchronisez sans écrasement.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const meta = createPreMigrationBackup({
+                      domains,
+                      courses,
+                      promoCodes,
+                      coachingPrograms,
+                      testimonials,
+                      siteSettings,
+                      students,
+                      orders,
+                      coachingRequests
+                    });
+                    setMigrationFeedback({
+                      ok: true,
+                      message: `✓ Sauvegarde locale téléchargée (${meta.fileName}).`
+                    });
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-slate-100 font-semibold text-xs flex items-center gap-2 cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-[#D4AF37]" />
+                  <span>Préparer une sauvegarde (.json)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={migratingCloud || !infraStatus?.supabase.serverConnected}
+                  onClick={async () => {
+                    if (!loadStoredBackupMeta()) {
+                      setMigrationFeedback({
+                        ok: false,
+                        message: 'Préparez d’abord une sauvegarde JSON locale avant de lancer la migration vers Supabase.'
+                      });
+                      return;
+                    }
+                    setMigratingCloud(true);
+                    setMigrationFeedback(null);
+                    try {
+                      const res = await migrateLocalCatalogToCloud();
+                      setMigrationFeedback(res);
+                    } finally {
+                      setMigratingCloud(false);
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>{migratingCloud ? 'Synchronisation...' : 'Synchroniser le catalogue vers Supabase'}</span>
+                </button>
+
+                {infraStatus?.supabase.serverConnected && (
+                  <button
+                    type="button"
+                    onClick={refreshSupabaseAdminData}
+                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Actualiser apprenants & commandes cloud</span>
+                  </button>
+                )}
+              </div>
+
+              {migrationFeedback && (
+                <div
+                  className={`p-3 rounded-lg text-xs border ${
+                    migrationFeedback.ok
+                      ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+                      : 'bg-red-950/60 border-red-800 text-red-200'
+                  }`}
+                >
+                  {migrationFeedback.message}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
       </div>
 
-      {/* Course + Curriculum Editor Modal */}
+      {/* Course + Pricing + Promo + Curriculum Editor Modal */}
       {showCourseModal && editingCourse && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="relative w-full max-w-3xl rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl p-6 space-y-6 my-8 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+          <div className="relative w-full max-w-3xl rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl p-5 sm:p-6 space-y-5 my-6 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
               <h3 className="font-brand text-lg font-bold text-slate-100">
-                Édition de la Formation & du Programme
+                Édition Formation, Tarifs & Programme
               </h3>
-              <button onClick={() => setShowCourseModal(false)} className="p-1 text-zinc-400 hover:text-white cursor-pointer">
+              <button onClick={() => setShowCourseModal(false)} className="p-1.5 text-zinc-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1595,45 +2185,126 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="text-zinc-400 block mb-1">Prix FCFA (XOF) *</label>
-                  <input
-                    type="number"
-                    required
-                    value={editingCourse.priceXOF}
-                    onChange={(e) => setEditingCourse({ ...editingCourse, priceXOF: Number(e.target.value) })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
+              {/* Base Prices */}
+              <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-3">
+                <span className="font-bold text-[#F3E5AB] block">Tarifs Normaux</span>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Prix FCFA (XOF) *</label>
+                    <input
+                      type="number"
+                      required
+                      value={editingCourse.priceXOF}
+                      onChange={(e) => setEditingCourse({ ...editingCourse, priceXOF: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Prix EUR (€)</label>
+                    <input
+                      type="number"
+                      value={editingCourse.priceEUR}
+                      onChange={(e) => setEditingCourse({ ...editingCourse, priceEUR: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Prix USD ($)</label>
+                    <input
+                      type="number"
+                      value={editingCourse.priceUSD}
+                      onChange={(e) => setEditingCourse({ ...editingCourse, priceUSD: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-slate-100"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Prix EUR (€)</label>
-                  <input
-                    type="number"
-                    value={editingCourse.priceEUR}
-                    onChange={(e) => setEditingCourse({ ...editingCourse, priceEUR: Number(e.target.value) })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Prix USD ($)</label>
-                  <input
-                    type="number"
-                    value={editingCourse.priceUSD}
-                    onChange={(e) => setEditingCourse({ ...editingCourse, priceUSD: Number(e.target.value) })}
-                    className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                  />
+
+                {/* Promotion Toggle & Promo Prices */}
+                <div className="pt-3 border-t border-zinc-800 space-y-3">
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingCourse.promoActive)}
+                      onChange={(e) =>
+                        setEditingCourse({
+                          ...editingCourse,
+                          promoActive: e.target.checked,
+                          promoPriceXOF:
+                            e.target.checked && !editingCourse.promoPriceXOF
+                              ? Math.round(editingCourse.priceXOF * 0.8)
+                              : editingCourse.promoPriceXOF
+                        })
+                      }
+                    />
+                    <Sparkles className="w-4 h-4 text-[#D4AF37]" />
+                    <span className="font-semibold text-slate-100">Activer la promotion sur cette formation</span>
+                  </label>
+
+                  {editingCourse.promoActive && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-zinc-400 block mb-1">Prix Promo FCFA *</label>
+                        <input
+                          type="number"
+                          value={editingCourse.promoPriceXOF ?? ''}
+                          onChange={(e) =>
+                            setEditingCourse({
+                              ...editingCourse,
+                              promoPriceXOF: e.target.value ? Number(e.target.value) : undefined
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-[#D4AF37]/50 text-[#F3E5AB]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-zinc-400 block mb-1">Prix Promo EUR (€)</label>
+                        <input
+                          type="number"
+                          value={editingCourse.promoPriceEUR ?? ''}
+                          onChange={(e) =>
+                            setEditingCourse({
+                              ...editingCourse,
+                              promoPriceEUR: e.target.value ? Number(e.target.value) : undefined
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-[#D4AF37]/50 text-[#F3E5AB]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-zinc-400 block mb-1">Prix Promo USD ($)</label>
+                        <input
+                          type="number"
+                          value={editingCourse.promoPriceUSD ?? ''}
+                          onChange={(e) =>
+                            setEditingCourse({
+                              ...editingCourse,
+                              promoPriceUSD: e.target.value ? Number(e.target.value) : undefined
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-[#D4AF37]/50 text-[#F3E5AB]"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
+              {/* Cover Image URL + Upload */}
               <div>
-                <label className="text-zinc-400 block mb-1">Image de couverture (URL)</label>
-                <input
-                  type="text"
-                  value={editingCourse.coverImage}
-                  onChange={(e) => setEditingCourse({ ...editingCourse, coverImage: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
-                />
+                <label className="text-zinc-400 block mb-1">Image de couverture (URL ou téléversement)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={editingCourse.coverImage}
+                    onChange={(e) => setEditingCourse({ ...editingCourse, coverImage: e.target.value })}
+                    className="flex-1 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                  <label className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-zinc-200 font-semibold cursor-pointer flex items-center gap-1.5 shrink-0">
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    <span>Image</span>
+                    <input type="file" accept="image/*" onChange={handleCoverUpload} className="hidden" />
+                  </label>
+                </div>
               </div>
 
               <div>
@@ -1644,6 +2315,51 @@ export const AdminDashboard: React.FC = () => {
                   onChange={(e) => setEditingCourse({ ...editingCourse, description: e.target.value })}
                   className="w-full p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
                 />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Objectifs (1 par ligne)</label>
+                  <textarea
+                    rows={3}
+                    value={editingCourse.objectives.join('\n')}
+                    onChange={(e) =>
+                      setEditingCourse({
+                        ...editingCourse,
+                        objectives: e.target.value.split('\n').filter((l) => l.trim().length > 0)
+                      })
+                    }
+                    className="w-full p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Compétences acquises (1 par ligne)</label>
+                  <textarea
+                    rows={3}
+                    value={editingCourse.skillsAcquired.join('\n')}
+                    onChange={(e) =>
+                      setEditingCourse({
+                        ...editingCourse,
+                        skillsAcquired: e.target.value.split('\n').filter((l) => l.trim().length > 0)
+                      })
+                    }
+                    className="w-full p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-400 block mb-1">Ressources incluses (1 par ligne)</label>
+                  <textarea
+                    rows={3}
+                    value={editingCourse.resourcesIncluded.join('\n')}
+                    onChange={(e) =>
+                      setEditingCourse({
+                        ...editingCourse,
+                        resourcesIncluded: e.target.value.split('\n').filter((l) => l.trim().length > 0)
+                      })
+                    }
+                    className="w-full p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100"
+                  />
+                </div>
               </div>
 
               {/* Modules & Lessons Curriculum Builder */}
@@ -1667,7 +2383,6 @@ export const AdminDashboard: React.FC = () => {
                               onClick={() => handleMoveModule(modIndex, -1)}
                               disabled={modIndex === 0}
                               className="p-1 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
-                              title="Monter le module"
                             >
                               <ArrowUp className="w-3.5 h-3.5" />
                             </button>
@@ -1676,7 +2391,6 @@ export const AdminDashboard: React.FC = () => {
                               onClick={() => handleMoveModule(modIndex, 1)}
                               disabled={modIndex === editingCourse.modules.length - 1}
                               className="p-1 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
-                              title="Descendre le module"
                             >
                               <ArrowDown className="w-3.5 h-3.5" />
                             </button>
@@ -1713,7 +2427,6 @@ export const AdminDashboard: React.FC = () => {
                                     onClick={() => handleMoveLesson(mod.id, lesIndex, -1)}
                                     disabled={lesIndex === 0}
                                     className="p-0.5 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
-                                    title="Monter"
                                   >
                                     <ArrowUp className="w-3 h-3" />
                                   </button>
@@ -1722,15 +2435,12 @@ export const AdminDashboard: React.FC = () => {
                                     onClick={() => handleMoveLesson(mod.id, lesIndex, 1)}
                                     disabled={lesIndex === mod.lessons.length - 1}
                                     className="p-0.5 text-zinc-400 hover:text-white disabled:opacity-30 cursor-pointer"
-                                    title="Descendre"
                                   >
                                     <ArrowDown className="w-3 h-3" />
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() =>
-                                      setEditingLessonId(editingLessonId === les.id ? null : les.id)
-                                    }
+                                    onClick={() => setEditingLessonId(editingLessonId === les.id ? null : les.id)}
                                     className="text-[#D4AF37] hover:underline cursor-pointer px-1"
                                   >
                                     {editingLessonId === les.id ? 'Fermer' : 'Éditer'}
@@ -1810,7 +2520,9 @@ export const AdminDashboard: React.FC = () => {
                                               ? {
                                                   ...m,
                                                   lessons: m.lessons.map((l) =>
-                                                    l.id === les.id ? { ...l, videoUrl: e.target.value || undefined } : l
+                                                    l.id === les.id
+                                                      ? { ...l, videoUrl: e.target.value || undefined }
+                                                      : l
                                                   )
                                                 }
                                               : m
@@ -2074,7 +2786,7 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center gap-6 pt-2">
+              <div className="flex flex-wrap items-center gap-6 pt-2">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -2092,19 +2804,30 @@ export const AdminDashboard: React.FC = () => {
                   />
                   <span className="text-slate-200">Mettre en avant sur l’accueil</span>
                 </label>
+
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editingCourse.certificateEligible}
+                    onChange={(e) =>
+                      setEditingCourse({ ...editingCourse, certificateEligible: e.target.checked })
+                    }
+                  />
+                  <span className="text-slate-200">Délivre un certificat</span>
+                </label>
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800">
                 <button
                   type="button"
                   onClick={() => setShowCourseModal(false)}
-                  className="px-4 py-2 rounded-lg bg-zinc-900 text-zinc-300 hover:text-white cursor-pointer"
+                  className="px-4 py-2.5 rounded-lg bg-zinc-900 text-zinc-300 hover:text-white cursor-pointer"
                 >
                   Annuler
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer"
+                  className="px-5 py-2.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold cursor-pointer"
                 >
                   Sauvegarder la formation
                 </button>

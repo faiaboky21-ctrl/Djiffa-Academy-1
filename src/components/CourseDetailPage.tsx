@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { getCoursePricing } from '../lib/pricing';
 import { Course } from '../types';
 import { 
   ArrowLeft, 
@@ -27,7 +28,7 @@ interface CourseDetailPageProps {
 }
 
 export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, onOpenCheckout }) => {
-  const { courses, navigateTo, formatPrice, isEnrolled, getCourseProgress } = useApp();
+  const { courses, navigateTo, formatPrice, isEnrolled, getCourseProgress, siteSettings } = useApp();
   const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>({
     'mod-1': true,
     'mod-2': true
@@ -36,6 +37,7 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
   const course = courses.find((c) => c.id === courseId) || courses[0];
   const enrolled = isEnrolled(course.id);
   const progress = getCourseProgress(course.id);
+  const pricing = getCoursePricing(course);
 
   const toggleModule = (modId: string) => {
     setExpandedModules(prev => ({ ...prev, [modId]: !prev[modId] }));
@@ -64,7 +66,7 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
                 <span className="text-[#D4AF37] font-semibold uppercase tracking-wider">
-                  DJIFFA ACADEMY
+                  {siteSettings.academyName}
                 </span>
                 <span aria-hidden="true" className="text-zinc-600">·</span>
                 <span>{course.duration}</span>
@@ -236,7 +238,7 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
             <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800/80 flex flex-col sm:flex-row items-center sm:items-start gap-6">
               <img
                 src="/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg"
-                alt="Faith Ariola"
+                alt={siteSettings.directorName}
                 className="w-24 h-24 rounded-full object-cover border-2 border-[#D4AF37]/60 shrink-0 shadow-lg"
                 referrerPolicy="no-referrer"
               />
@@ -245,10 +247,10 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
                   Votre Formatrice & Directrice
                 </span>
                 <h3 className="font-brand text-lg font-bold text-slate-100">
-                  Faith Ariola
+                  {siteSettings.directorName}
                 </h3>
                 <p className="text-xs text-zinc-300 leading-relaxed">
-                  Fondatrice et directrice de DJIFFA DESIGN AGENCY. Pionnière dans l’application commerciale de l’intelligence artificielle créative en Afrique de l’Ouest et sur le marché international. Elle accompagne des marques de prestige, des stylistes et des créateurs de contenu vers l’excellence visuelle et l’indépendance financière.
+                  {siteSettings.directorBio}
                 </p>
               </div>
             </div>
@@ -261,15 +263,17 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
               
               <div>
                 <span className="text-[11px] uppercase tracking-wider text-zinc-400 font-semibold block mb-1">
-                  Accès Individuel Illimité
+                  {pricing.isPromo && pricing.discountPercent
+                    ? `Offre Promotionnelle (-${pricing.discountPercent}%)`
+                    : 'Accès Individuel Illimité'}
                 </span>
                 <div className="flex items-baseline gap-2">
                   <span className="font-brand text-3xl font-extrabold text-[#D4AF37] tabular-nums">
-                    {formatPrice(course.priceXOF)}
+                    {formatPrice(pricing.activeXOF)}
                   </span>
-                  {course.originalPriceXOF && (
+                  {pricing.crossedOutXOF && (
                     <span className="text-sm text-zinc-500 line-through tabular-nums">
-                      {formatPrice(course.originalPriceXOF)}
+                      {formatPrice(pricing.crossedOutXOF)}
                     </span>
                   )}
                 </div>

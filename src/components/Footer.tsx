@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { useApp } from '../context/AppContext';
-import { ShieldCheck } from 'lucide-react';
+import { ShieldCheck, ExternalLink } from 'lucide-react';
 
 export const Footer: React.FC = () => {
   const { navigateTo, openAuthModal, siteSettings, language, setLanguage } = useApp();
@@ -33,27 +33,71 @@ export const Footer: React.FC = () => {
               )}
               <div className="flex flex-col">
                 <span className="font-brand text-lg font-extrabold tracking-widest text-slate-100 uppercase">
-                  DJIFFA <span className="text-[#D4AF37]">ACADEMY</span>
+                  {siteSettings.academyName}
                 </span>
                 <span className="text-[10px] text-zinc-400 tracking-wider uppercase font-medium">
-                  Une branche de DJIFFA DESIGN AGENCY
+                  Une branche de {siteSettings.parentAgencyName}
                 </span>
               </div>
             </div>
 
             <p className="text-zinc-400 text-xs leading-relaxed max-w-sm">
-              Plateforme internationale de formation, de vente et d’accompagnement d’élite en intelligence artificielle créative, création vidéo publicitaire, mode virtuelle et cinéma.
+              {siteSettings.academyPresentation}
             </p>
 
             <div className="text-[11px] text-zinc-400 pt-1">
-              Créée et dirigée par <strong className="text-[#F3E5AB]">Faith Ariola</strong>.
+              Créée et dirigée par <strong className="text-[#F3E5AB]">{siteSettings.directorName}</strong>.
             </div>
 
-            <div className="pt-2 flex items-center gap-3 text-[11px] text-zinc-400">
+            <div className="pt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
               <span>{siteSettings.headquarters}</span>
               <span>·</span>
               <span>{siteSettings.contactEmail}</span>
+              {siteSettings.whatsappNumber && (
+                <>
+                  <span>·</span>
+                  <span>WhatsApp : {siteSettings.whatsappNumber}</span>
+                </>
+              )}
             </div>
+
+            {(siteSettings.instagramUrl || siteSettings.linkedinUrl || siteSettings.youtubeUrl) && (
+              <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px]">
+                {siteSettings.instagramUrl && (
+                  <a
+                    href={siteSettings.instagramUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
+                  >
+                    <span>Instagram</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+                {siteSettings.linkedinUrl && (
+                  <a
+                    href={siteSettings.linkedinUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
+                  >
+                    <span>LinkedIn</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+                {siteSettings.youtubeUrl && (
+                  <a
+                    href={siteSettings.youtubeUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
+                  >
+                    <span>YouTube</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Col 2: Navigation */}
@@ -208,14 +252,14 @@ export const Footer: React.FC = () => {
         {/* Bottom Legal & Copyright Bar */}
         <div className="pt-8 border-t border-zinc-900 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-zinc-400">
           <div>
-            © {new Date().getFullYear()} DJIFFA ACADEMY — Une marque de DJIFFA DESIGN AGENCY. Tous droits réservés.
+            © {new Date().getFullYear()} {siteSettings.academyName} — Une marque de {siteSettings.parentAgencyName}. Tous droits réservés.
           </div>
 
           <div className="flex items-center gap-6">
-            <button onClick={() => navigateTo('contact')} className="hover:text-zinc-300 cursor-pointer">
+            <button onClick={() => navigateTo('legal-cgv')} className="hover:text-[#D4AF37] cursor-pointer">
               Conditions Générales de Vente
             </button>
-            <button onClick={() => navigateTo('about')} className="hover:text-zinc-300 cursor-pointer">
+            <button onClick={() => navigateTo('legal-mentions')} className="hover:text-[#D4AF37] cursor-pointer">
               Mentions Légales
             </button>
           </div>

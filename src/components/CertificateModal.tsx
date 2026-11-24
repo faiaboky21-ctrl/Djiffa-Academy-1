@@ -97,7 +97,7 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({ courseId, on
             )}
 
             <span className="text-xs uppercase tracking-widest text-[#D4AF37] font-semibold block">
-              DJIFFA DESIGN AGENCY PRÉSENTE
+              {siteSettings.parentAgencyName} PRÉSENTE
             </span>
 
             <h1 className="font-brand text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-wider text-[#F3E5AB]">
@@ -105,7 +105,7 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({ courseId, on
             </h1>
 
             <p className="text-xs text-zinc-400 uppercase tracking-widest">
-              Délivré par DJIFFA ACADEMY en reconnaissance de l’excellence pratique
+              Délivré par {siteSettings.academyName} en reconnaissance de l’excellence pratique
             </p>
           </div>
 
@@ -153,10 +153,10 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({ courseId, on
                 Direction Générale
               </span>
               <div className="font-serif italic text-xl text-[#F3E5AB] font-bold py-1">
-                {cert.directorName}
+                {cert.directorName || siteSettings.directorName}
               </div>
               <span className="text-slate-300 font-medium block">Directrice & Fondatrice</span>
-              <span className="text-[10px] text-zinc-500 block">DJIFFA DESIGN AGENCY</span>
+              <span className="text-[10px] text-zinc-500 block">{siteSettings.parentAgencyName}</span>
             </div>
           </div>
         </div>

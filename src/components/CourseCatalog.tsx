@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { TRANSLATIONS } from '../i18n/translations';
 import { Course, CourseDomain, CourseLevel } from '../types';
+import { getCoursePricing } from '../lib/pricing';
 import { CourseCard } from './CourseCard';
 import { Search, Sparkles, Filter, SlidersHorizontal, ArrowUpDown } from 'lucide-react';
 
@@ -32,8 +33,9 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ onOpenCheckout }) 
       if (selectedDomain !== 'all' && course.domain !== selectedDomain) return false;
       if (selectedLevel !== 'all' && course.level !== selectedLevel) return false;
 
-      if (priceFilter === 'under_100k' && course.priceXOF >= 100000) return false;
-      if (priceFilter === '100k_plus' && course.priceXOF < 100000) return false;
+      const effectiveXOF = getCoursePricing(course).activeXOF;
+      if (priceFilter === 'under_100k' && effectiveXOF >= 100000) return false;
+      if (priceFilter === '100k_plus' && effectiveXOF < 100000) return false;
 
       if (searchQuery.trim() !== '') {
         const q = searchQuery.toLowerCase();
@@ -47,8 +49,10 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ onOpenCheckout }) 
       return true;
     })
     .sort((a, b) => {
-      if (sortBy === 'price_asc') return a.priceXOF - b.priceXOF;
-      if (sortBy === 'price_desc') return b.priceXOF - a.priceXOF;
+      const priceA = getCoursePricing(a).activeXOF;
+      const priceB = getCoursePricing(b).activeXOF;
+      if (sortBy === 'price_asc') return priceA - priceB;
+      if (sortBy === 'price_desc') return priceB - priceA;
       return 0;
     });
 

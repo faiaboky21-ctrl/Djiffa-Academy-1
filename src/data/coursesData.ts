@@ -4,6 +4,7 @@
  */
 
 import { Course, DomainCategory, PromoCode, SiteSettings, CoachingProgramConfig } from '../types';
+import { BRAND_IMAGES } from '../lib/assets';
 
 export const INITIAL_COURSES: Course[] = [
   {
@@ -21,7 +22,7 @@ export const INITIAL_COURSES: Course[] = [
     originalPriceXOF: 175000,
     priceEUR: 190,
     priceUSD: 205,
-    coverImage: '/src/assets/images/course_method_faith_ariola_1794341070404.jpg',
+    coverImage: BRAND_IMAGES.courseMethod,
     isFeatured: true,
     isPublished: true,
     certificateEligible: true,
@@ -355,7 +356,7 @@ export const INITIAL_COURSES: Course[] = [
     originalPriceXOF: 135000,
     priceEUR: 145,
     priceUSD: 160,
-    coverImage: '/src/assets/images/course_virtual_fashion_ai_1794341069864.jpg',
+    coverImage: BRAND_IMAGES.courseFashion,
     isFeatured: true,
     isPublished: true,
     certificateEligible: true,
@@ -444,7 +445,7 @@ export const INITIAL_COURSES: Course[] = [
     originalPriceXOF: 150000,
     priceEUR: 165,
     priceUSD: 180,
-    coverImage: '/src/assets/images/course_cinema_storytelling_1794341071738.jpg',
+    coverImage: BRAND_IMAGES.courseCinema,
     isFeatured: true,
     isPublished: true,
     certificateEligible: true,
@@ -501,7 +502,7 @@ export const INITIAL_COURSES: Course[] = [
     originalPriceXOF: 120000,
     priceEUR: 130,
     priceUSD: 140,
-    coverImage: '/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg',
+    coverImage: BRAND_IMAGES.faithPortrait,
     isFeatured: true,
     isPublished: true,
     certificateEligible: true,

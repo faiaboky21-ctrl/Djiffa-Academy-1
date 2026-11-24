@@ -24,6 +24,7 @@ import { CertificateModal } from './components/CertificateModal';
 import { AuthModal } from './components/AuthModal';
 import { Course } from './types';
 import { getCoursePricing } from './lib/pricing';
+import { BRAND_IMAGES } from './lib/assets';
 import { ArrowRight, ArrowLeft, Sparkles, CheckCircle, MessageSquareQuote, X, Info, Scale } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
@@ -186,7 +187,7 @@ const MainAppContent: React.FC = () => {
                       <div className="lg:col-span-5 relative">
                         <div className="relative rounded-2xl overflow-hidden border border-zinc-800 shadow-xl aspect-[16/10]">
                           <img
-                            src="/src/assets/images/course_method_faith_ariola_1794341070404.jpg"
+                            src={BRAND_IMAGES.courseMethod}
                             alt="Pipeline de production vidéo IA Faith Ariola"
                             className="w-full h-full object-cover"
                             referrerPolicy="no-referrer"

@@ -6,6 +6,7 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
 import { ShieldCheck, ExternalLink } from 'lucide-react';
+import { safeExternalUrl } from '../lib/media';
 
 export const Footer: React.FC = () => {
   const { navigateTo, openAuthModal, siteSettings, language, setLanguage } = useApp();
@@ -61,35 +62,37 @@ export const Footer: React.FC = () => {
               )}
             </div>
 
-            {(siteSettings.instagramUrl || siteSettings.linkedinUrl || siteSettings.youtubeUrl) && (
+            {(safeExternalUrl(siteSettings.instagramUrl) ||
+              safeExternalUrl(siteSettings.linkedinUrl) ||
+              safeExternalUrl(siteSettings.youtubeUrl)) && (
               <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px]">
-                {siteSettings.instagramUrl && (
+                {safeExternalUrl(siteSettings.instagramUrl) && (
                   <a
-                    href={siteSettings.instagramUrl}
+                    href={safeExternalUrl(siteSettings.instagramUrl)!}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noreferrer noopener"
                     className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
                   >
                     <span>Instagram</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 )}
-                {siteSettings.linkedinUrl && (
+                {safeExternalUrl(siteSettings.linkedinUrl) && (
                   <a
-                    href={siteSettings.linkedinUrl}
+                    href={safeExternalUrl(siteSettings.linkedinUrl)!}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noreferrer noopener"
                     className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
                   >
                     <span>LinkedIn</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 )}
-                {siteSettings.youtubeUrl && (
+                {safeExternalUrl(siteSettings.youtubeUrl) && (
                   <a
-                    href={siteSettings.youtubeUrl}
+                    href={safeExternalUrl(siteSettings.youtubeUrl)!}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noreferrer noopener"
                     className="inline-flex items-center gap-1 text-zinc-300 hover:text-[#D4AF37]"
                   >
                     <span>YouTube</span>

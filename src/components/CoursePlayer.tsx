@@ -6,7 +6,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { Lesson, CourseModule } from '../types';
-import { resolveVideoSource, isSupabaseStorageRef, fetchProtectedSignedMediaUrl } from '../lib/media';
+import { resolveVideoSource, isSupabaseStorageRef, fetchProtectedSignedMediaUrl, safeExternalUrl } from '../lib/media';
+import { resolveAssetImageUrl } from '../lib/assets';
 import { getSupabaseAccessToken } from '../lib/supabase';
 import { sanitizeLessonHtml } from '../lib/sanitizeHtml';
 import {
@@ -80,7 +81,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
     return 0;
   });
 
-  const [activeTab, setActiveTab] = useState<'content' | 'exercise' | 'quiz' | 'resources'>('content');
+  const [activeTab, setActiveTab] = useState<'content' | 'exercise' | 'quiz' | 'resources' | 'final-quiz'>('content');
   const [isPlaying, setIsPlaying] = useState(false);
   const [exerciseText, setExerciseText] = useState('');
   const [exerciseLink, setExerciseLink] = useState('');
@@ -94,6 +95,14 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number>>({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
   const [quizScore, setQuizScore] = useState<{ score: number; total: number } | null>(null);
+
+  const finalQuizId = `final-${course.id}`;
+  const savedFinalQuiz = currentUser?.quizScores?.[finalQuizId];
+  const [finalAnswers, setFinalAnswers] = useState<Record<string, number>>({});
+  const [finalQuizSubmitted, setFinalQuizSubmitted] = useState(Boolean(savedFinalQuiz));
+  const [finalQuizScore, setFinalQuizScore] = useState<{ score: number; total: number } | null>(
+    savedFinalQuiz ? { score: savedFinalQuiz.score, total: savedFinalQuiz.total } : null
+  );
 
   const currentItem = allLessons[currentLessonIndex] || allLessons[0];
   const currentLesson = currentItem?.lesson;
@@ -294,6 +303,19 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
     submitQuizResult(currentLesson.id, correctCount, currentLesson.quiz.length);
   };
 
+  const handleSubmitFinalQuiz = () => {
+    if (!course.finalQuiz || course.finalQuiz.length === 0) return;
+    let correctCount = 0;
+    course.finalQuiz.forEach((q) => {
+      if (finalAnswers[q.id] === q.correctIndex) {
+        correctCount++;
+      }
+    });
+    setFinalQuizScore({ score: correctCount, total: course.finalQuiz.length });
+    setFinalQuizSubmitted(true);
+    submitQuizResult(finalQuizId, correctCount, course.finalQuiz.length);
+  };
+
   const handleDownloadResource = async (resName: string, url?: string) => {
     const sbRef = isSupabaseStorageRef(url);
     if (sbRef) {
@@ -325,8 +347,14 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
     }
 
     if (url) {
+      const safeHref = safeExternalUrl(url);
+      if (!safeHref) {
+        setDownloadFeedback('Lien de ressource invalide (seuls les liens http/https sont autorisés).');
+        setTimeout(() => setDownloadFeedback(null), 3500);
+        return;
+      }
       const link = document.createElement('a');
-      link.href = url;
+      link.href = safeHref;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
       link.click();
@@ -489,7 +517,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
               <>
                 <div className="absolute inset-0 flex items-center justify-center">
                   <img
-                    src={course.coverImage}
+                    src={resolveAssetImageUrl(course.coverImage)}
                     alt={currentLesson.title}
                     className="w-full h-full object-cover opacity-60"
                     referrerPolicy="no-referrer"
@@ -612,6 +640,18 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Téléchargements ({currentLesson.downloads.length})</span>
+              </button>
+            )}
+
+            {course.finalQuiz && course.finalQuiz.length > 0 && (
+              <button
+                onClick={() => setActiveTab('final-quiz')}
+                className={`flex-1 py-2 px-3 text-xs font-semibold rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                  activeTab === 'final-quiz' ? 'bg-zinc-800 text-[#F3E5AB]' : 'text-zinc-400 hover:text-slate-200'
+                }`}
+              >
+                <Award className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>Examen Final ({course.finalQuiz.length})</span>
               </button>
             )}
           </div>
@@ -826,6 +866,98 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
             </div>
           )}
 
+          {activeTab === 'final-quiz' && course.finalQuiz && course.finalQuiz.length > 0 && (
+            <div className="p-6 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 space-y-6">
+              <div className="space-y-1">
+                <span className="text-[11px] uppercase tracking-wider text-[#D4AF37] font-semibold block">
+                  Validation Finale · {course.title}
+                </span>
+                <h3 className="font-brand text-lg font-bold text-slate-100">Examen Final du Programme</h3>
+                <p className="text-xs text-zinc-400">
+                  Évaluez votre maîtrise globale des concepts du programme ({course.finalQuiz.length} question(s)).
+                </p>
+              </div>
+              <div className="space-y-6">
+                {course.finalQuiz.map((q, qIndex) => (
+                  <div key={q.id} className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-3">
+                    <span className="text-xs font-semibold text-slate-200 block">
+                      {qIndex + 1}. {q.question}
+                    </span>
+                    <div className="space-y-2">
+                      {q.options.map((opt, optIndex) => {
+                        const isSelected = finalAnswers[q.id] === optIndex;
+                        const isCorrect = q.correctIndex === optIndex;
+                        let optionClass = 'border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700';
+
+                        if (finalQuizSubmitted) {
+                          if (isCorrect) optionClass = 'border-emerald-500 bg-emerald-950/50 text-emerald-300';
+                          else if (isSelected && !isCorrect) optionClass = 'border-red-500 bg-red-950/50 text-red-300';
+                        } else if (isSelected) {
+                          optionClass = 'border-[#D4AF37] bg-[#D4AF37]/10 text-white font-medium';
+                        }
+
+                        return (
+                          <button
+                            key={optIndex}
+                            type="button"
+                            onClick={() => {
+                              if (!finalQuizSubmitted) {
+                                setFinalAnswers((prev) => ({ ...prev, [q.id]: optIndex }));
+                              }
+                            }}
+                            className={`w-full text-left p-3 rounded-lg border text-xs transition-colors flex items-center justify-between cursor-pointer ${optionClass}`}
+                          >
+                            <span>{opt}</span>
+                            {finalQuizSubmitted && isCorrect && (
+                              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {finalQuizSubmitted && (
+                      <p className="text-[11px] text-zinc-400 pt-1">
+                        <strong>Explication :</strong> {q.explanation}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {!finalQuizSubmitted ? (
+                <button
+                  onClick={handleSubmitFinalQuiz}
+                  disabled={Object.keys(finalAnswers).length < course.finalQuiz.length}
+                  className="w-full py-3 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider transition-all disabled:opacity-40 cursor-pointer"
+                >
+                  Valider l’Examen Final
+                </button>
+              ) : (
+                <div className="flex items-center justify-between p-4 rounded-xl bg-zinc-900 border border-zinc-800">
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-100">
+                      Score Final : {finalQuizScore?.score} / {finalQuizScore?.total}
+                    </span>
+                    <span className="text-zinc-400 ml-2">
+                      ({finalQuizScore && finalQuizScore.score / finalQuizScore.total >= 0.7
+                        ? 'Examen réussi'
+                        : 'À perfectionner'})
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setFinalQuizSubmitted(false);
+                      setFinalAnswers({});
+                    }}
+                    className="text-xs text-[#D4AF37] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Recommencer</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
         </div>
 
         {/* Right Sidebar: Course Curriculum */}
@@ -876,6 +1008,29 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
               </div>
             ))}
           </div>
+
+          {course.finalQuiz && course.finalQuiz.length > 0 && (
+            <div className="p-3 border-t border-zinc-800 bg-zinc-900/40">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('final-quiz');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className={`w-full p-2.5 rounded-lg text-xs font-semibold flex items-center justify-between cursor-pointer transition-colors ${
+                  activeTab === 'final-quiz'
+                    ? 'bg-[#D4AF37] text-zinc-950 font-bold'
+                    : 'bg-zinc-900 hover:bg-zinc-800 text-[#F3E5AB] border border-[#D4AF37]/30'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <Award className="w-4 h-4" />
+                  <span>Examen Final du Programme</span>
+                </span>
+                <span className="text-[10px] font-mono">{course.finalQuiz.length} Q</span>
+              </button>
+            </div>
+          )}
         </div>
 
       </div>

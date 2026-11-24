@@ -1553,7 +1553,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     };
     setCurrentUser(updatedUser);
-    const matchedCourse = courses.find((c) => c.modules.some((m) => m.lessons.some((l) => l.id === quizId)));
+    const matchedCourse = courses.find(
+      (c) =>
+        `final-${c.id}` === quizId ||
+        c.modules.some((m) => m.lessons.some((l) => l.id === quizId))
+    );
     if (matchedCourse) {
       persistProgressToSupabase(updatedUser, matchedCourse.id);
     }
@@ -1764,11 +1768,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setCoachingRequests((prev) => [newReq, ...prev]);
 
-    fetch('/api/public/coaching-request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newReq)
-    }).catch(() => undefined);
+    getSupabaseAccessToken()
+      .then((supabaseToken) => {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (supabaseToken) headers['Authorization'] = `Bearer ${supabaseToken}`;
+        return fetch('/api/public/coaching-request', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(newReq)
+        });
+      })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((serverData) => {
+        if (serverData?.ok && serverData.id && serverData.id !== newReq.id) {
+          setCoachingRequests((prev) =>
+            prev.map((r) => (r.id === newReq.id ? { ...r, id: String(serverData.id) } : r))
+          );
+        }
+      })
+      .catch(() => undefined);
 
     pushNotification(
       user.id,
@@ -1786,8 +1804,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     subject: string;
     message: string;
   }): Promise<ContactMessage> => {
+    const tempId = `msg-${Date.now()}`;
     const item: ContactMessage = {
-      id: `msg-${Date.now()}`,
+      id: tempId,
       name: data.name.trim(),
       email: data.email.trim(),
       phone: data.phone?.trim() || undefined,
@@ -1800,11 +1819,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setContactMessages((prev) => [item, ...prev]);
 
     try {
-      await fetch('/api/public/contact', {
+      const res = await fetch('/api/public/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(item)
       });
+      if (res.ok) {
+        const payload = await res.json();
+        if (payload?.ok && payload.item?.id && payload.item.id !== tempId) {
+          const syncedItem: ContactMessage = { ...item, id: String(payload.item.id), createdAt: payload.item.createdAt || item.createdAt };
+          setContactMessages((prev) => prev.map((m) => (m.id === tempId ? syncedItem : m)));
+          return syncedItem;
+        }
+      }
     } catch {
       // local state already preserved
     }
@@ -1818,16 +1845,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         m.id === id ? { ...m, status, adminNotes: adminNotes !== undefined ? adminNotes : m.adminNotes } : m
       )
     );
-    if (adminToken) {
-      fetch(`/api/admin/contact-messages/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ status, adminNotes })
-      }).catch(() => undefined);
-    }
+    getSupabaseAccessToken()
+      .then((supabaseToken) => {
+        if (!adminToken && !supabaseToken) return;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+        if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
+        return fetch(`/api/admin/contact-messages/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ status, adminNotes })
+        });
+      })
+      .catch(() => undefined);
   };
 
   // Cloud Migration & Student Sync

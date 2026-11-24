@@ -87,6 +87,8 @@ interface LaunchAuditResponse {
         secretKeySet: boolean;
         webhookSecretSet: boolean;
         configured: boolean;
+        keyEnvironment?: 'sandbox' | 'live' | 'mixed' | 'unknown' | 'unset';
+        keyModeAligned?: boolean;
       };
       kkiapay: {
         publicKeySet: boolean;
@@ -1389,6 +1391,25 @@ git push -u origin main`}
                           )}
                         </div>
                         <p className="text-[11px] text-zinc-400">{prov.desc}</p>
+                        {prov.id === 'fedapay' && audit?.payments.providers.fedapay.configured && (
+                          <p
+                            className={`text-[10px] mt-1 font-medium ${
+                              audit.payments.providers.fedapay.keyModeAligned === false
+                                ? 'text-red-300'
+                                : 'text-zinc-300'
+                            }`}
+                          >
+                            {audit.payments.providers.fedapay.keyModeAligned === false
+                              ? `Alerte : clés détectées (${audit.payments.providers.fedapay.keyEnvironment?.toUpperCase()}) incompatibles avec PAYMENT_MODE=${audit.payments.mode}.`
+                              : `Type de clés détecté : ${
+                                  audit.payments.providers.fedapay.keyEnvironment === 'sandbox'
+                                    ? 'Sandbox (Test)'
+                                    : audit.payments.providers.fedapay.keyEnvironment === 'live'
+                                    ? 'Live (Production)'
+                                    : 'Personnalisé'
+                                }.`}
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <StatusBadge status={provStatus} />

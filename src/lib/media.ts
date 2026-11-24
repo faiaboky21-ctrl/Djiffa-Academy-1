@@ -121,3 +121,18 @@ export async function fetchProtectedSignedMediaUrl(params: {
   });
   return res.json();
 }
+
+export function safeExternalUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl || !rawUrl.trim()) return null;
+  const trimmed = rawUrl.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+

@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { getCoursePricing } from '../lib/pricing';
+import { BRAND_IMAGES, resolveAssetImageUrl } from '../lib/assets';
 import { Course } from '../types';
 import { 
   ArrowLeft, 
@@ -86,7 +87,7 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
             {/* Banner Cover with Play Preview */}
             <div className="relative rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 aspect-[16/9] shadow-2xl">
               <img
-                src={course.coverImage}
+                src={resolveAssetImageUrl(course.coverImage)}
                 alt={course.title}
                 className="w-full h-full object-cover"
                 referrerPolicy="no-referrer"
@@ -237,7 +238,7 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
             {/* Instructor Presentation */}
             <div className="p-6 sm:p-8 rounded-2xl bg-zinc-950 border border-zinc-800/80 flex flex-col sm:flex-row items-center sm:items-start gap-6">
               <img
-                src="/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg"
+                src={BRAND_IMAGES.faithPortrait}
                 alt={siteSettings.directorName}
                 className="w-24 h-24 rounded-full object-cover border-2 border-[#D4AF37]/60 shrink-0 shadow-lg"
                 referrerPolicy="no-referrer"
@@ -314,7 +315,9 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
                 </div>
                 <div className="flex items-center gap-2.5">
                   <BookOpen className="w-4 h-4 text-[#D4AF37]" />
-                  <span>{course.lessonsCount} leçons vidéo haute définition</span>
+                  <span>
+                    {course.modules.reduce((acc, m) => acc + m.lessons.length, 0) || course.lessonsCount} leçon(s) structurée(s)
+                  </span>
                 </div>
                 <div className="flex items-center gap-2.5">
                   <Download className="w-4 h-4 text-[#D4AF37]" />

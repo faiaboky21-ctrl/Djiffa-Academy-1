@@ -9,6 +9,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { Course, CourseModule, Lesson, ContactMessage } from '../types';
 import { getCoursePricing } from '../lib/pricing';
+import { BRAND_IMAGES, resolveAssetImageUrl } from '../lib/assets';
 import { getSupabaseAccessToken } from '../lib/supabase';
 import { createPreMigrationBackup, loadStoredBackupMeta } from '../lib/migration';
 import { LaunchCenter } from './LaunchCenter';
@@ -505,7 +506,7 @@ export const AdminDashboard: React.FC = () => {
         <div className="p-5 sm:p-8 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 flex flex-col lg:flex-row lg:items-center justify-between gap-5 shadow-2xl">
           <div className="flex items-center gap-4">
             <img
-              src="/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg"
+              src={BRAND_IMAGES.faithPortrait}
               alt={siteSettings.directorName}
               className="w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover border-2 border-[#D4AF37] shadow-lg shrink-0"
               referrerPolicy="no-referrer"
@@ -741,7 +742,7 @@ export const AdminDashboard: React.FC = () => {
                       priceEUR: 115,
                       priceUSD: 125,
                       promoActive: false,
-                      coverImage: '/src/assets/images/course_method_faith_ariola_1794341070404.jpg',
+                      coverImage: BRAND_IMAGES.courseMethod,
                       isFeatured: false,
                       isPublished: true,
                       certificateEligible: true,
@@ -769,7 +770,7 @@ export const AdminDashboard: React.FC = () => {
                     >
                       <div className="flex items-start sm:items-center gap-4">
                         <img
-                          src={c.coverImage}
+                          src={resolveAssetImageUrl(c.coverImage)}
                           alt={c.title}
                           className="w-20 h-14 rounded-lg object-cover border border-zinc-800 shrink-0"
                         />

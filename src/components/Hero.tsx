@@ -6,6 +6,7 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
 import { ArrowRight, Sparkles, Award, ShieldCheck, PlayCircle } from 'lucide-react';
+import { BRAND_IMAGES } from '../lib/assets';
 
 export const Hero: React.FC = () => {
   const { navigateTo, siteSettings } = useApp();
@@ -92,7 +93,7 @@ export const Hero: React.FC = () => {
               
               <div className="relative rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
                 <img
-                  src="/src/assets/images/hero_faith_ariola_academy_1794341068588.jpg"
+                  src={BRAND_IMAGES.faithPortrait}
                   alt="Faith Ariola - Directrice et Créatrice de DJIFFA ACADEMY et DJIFFA DESIGN AGENCY"
                   className="w-full h-[420px] sm:h-[480px] object-cover object-top"
                   referrerPolicy="no-referrer"

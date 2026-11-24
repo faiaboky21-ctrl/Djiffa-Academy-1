@@ -46,7 +46,7 @@ interface ServerContactMessage {
   phone?: string;
   subject: string;
   message: string;
-  status: 'new' | 'read' | 'replied';
+  status: 'new' | 'read' | 'replied' | 'archived';
   adminNotes?: string;
   createdAt: string;
 }
@@ -87,6 +87,38 @@ if (supabaseUrl && supabaseServiceKey) {
 }
 const supabaseAdmin: SupabaseClient | null = supabaseAdminClient;
 
+type KeyEnvKind = 'sandbox' | 'live' | 'mixed' | 'unknown' | 'unset';
+
+function inspectFedaPayKeys(
+  pubRaw: string,
+  secRaw: string,
+  mode: 'sandbox' | 'live'
+): { keyEnvironment: KeyEnvKind; keyModeAligned: boolean } {
+  const pub = pubRaw.trim();
+  const sec = secRaw.trim();
+  if (!pub && !sec) {
+    return { keyEnvironment: 'unset', keyModeAligned: true };
+  }
+  const pubIsSandbox = pub.startsWith('pk_sandbox_');
+  const pubIsLive = pub.startsWith('pk_live_');
+  const secIsSandbox = sec.startsWith('sk_sandbox_');
+  const secIsLive = sec.startsWith('sk_live_');
+
+  const hasSandbox = pubIsSandbox || secIsSandbox;
+  const hasLive = pubIsLive || secIsLive;
+
+  if (hasSandbox && hasLive) {
+    return { keyEnvironment: 'mixed', keyModeAligned: false };
+  }
+  if (hasSandbox) {
+    return { keyEnvironment: 'sandbox', keyModeAligned: mode === 'sandbox' };
+  }
+  if (hasLive) {
+    return { keyEnvironment: 'live', keyModeAligned: mode === 'live' };
+  }
+  return { keyEnvironment: 'unknown', keyModeAligned: true };
+}
+
 interface PaymentStatusInfo {
   configured: boolean;
   provider: 'fedapay' | 'kkiapay' | 'cinetpay';
@@ -94,20 +126,27 @@ interface PaymentStatusInfo {
   publicKey: string | null;
   siteId: string | null;
   supportedMethods: string[];
+  keyEnvironment?: KeyEnvKind;
+  keyModeAligned?: boolean;
   message: string;
 }
 
 function getServerPaymentStatus(): PaymentStatusInfo {
-  const providerEnv = (process.env.PAYMENT_PROVIDER || 'fedapay').toLowerCase();
+  const providerEnv = (process.env.PAYMENT_PROVIDER || 'fedapay').trim().toLowerCase();
   const provider: 'fedapay' | 'kkiapay' | 'cinetpay' =
     providerEnv === 'kkiapay' ? 'kkiapay' : providerEnv === 'cinetpay' ? 'cinetpay' : 'fedapay';
   const mode: 'sandbox' | 'live' =
-    (process.env.PAYMENT_MODE || 'sandbox').toLowerCase() === 'live' ? 'live' : 'sandbox';
+    (process.env.PAYMENT_MODE || 'sandbox').trim().toLowerCase() === 'live' ? 'live' : 'sandbox';
 
   if (provider === 'fedapay') {
-    const pub = process.env.FEDAPAY_PUBLIC_KEY || '';
-    const sec = process.env.FEDAPAY_SECRET_KEY || '';
+    const pub = (process.env.FEDAPAY_PUBLIC_KEY || '').trim();
+    const sec = (process.env.FEDAPAY_SECRET_KEY || '').trim();
     const configured = Boolean(pub && sec);
+    const { keyEnvironment, keyModeAligned } = inspectFedaPayKeys(pub, sec, mode);
+    const mismatchMsg =
+      configured && !keyModeAligned
+        ? `Incohérence FedaPay : PAYMENT_MODE=${mode}, mais les clés configurées sont de type ${keyEnvironment.toUpperCase()}.`
+        : null;
     return {
       configured,
       provider: 'fedapay',
@@ -115,9 +154,13 @@ function getServerPaymentStatus(): PaymentStatusInfo {
       publicKey: pub || null,
       siteId: null,
       supportedMethods: ['MTN Mobile Money', 'Moov Money', 'Visa', 'Mastercard'],
-      message: configured
-        ? `Passerelle FedaPay connectée (${mode === 'live' ? 'Production' : 'Sandbox'}).`
-        : 'Paiement non configuré côté serveur (clés FEDAPAY_PUBLIC_KEY / FEDAPAY_SECRET_KEY absentes).'
+      keyEnvironment,
+      keyModeAligned,
+      message:
+        mismatchMsg ||
+        (configured
+          ? `Passerelle FedaPay connectée (${mode === 'live' ? 'Production' : 'Sandbox'}).`
+          : 'Paiement non configuré côté serveur (clés FEDAPAY_PUBLIC_KEY / FEDAPAY_SECRET_KEY absentes).')
     };
   }
 
@@ -235,27 +278,40 @@ async function resolveCallerAuth(req: express.Request): Promise<{
 
 async function activateOrderEnrollmentInSupabase(reference: string, providerTransactionId?: string) {
   if (!supabaseAdmin) return;
-  const { data: orderRow } = await supabaseAdmin
+  const { data: orderRow, error: fetchErr } = await supabaseAdmin
     .from('orders')
     .select('*')
     .eq('reference', reference)
     .maybeSingle();
 
-  if (!orderRow) return;
+  if (fetchErr || !orderRow) return;
+
+  let targetUserId: string | null = orderRow.user_id || null;
+  if (!targetUserId && orderRow.user_email) {
+    const { data: matchedProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .ilike('email', String(orderRow.user_email).trim())
+      .maybeSingle();
+    if (matchedProfile?.id) {
+      targetUserId = matchedProfile.id;
+    }
+  }
 
   await supabaseAdmin
     .from('orders')
     .update({
       status: 'confirmed',
+      user_id: targetUserId,
       provider_transaction_id: providerTransactionId || orderRow.provider_transaction_id,
       confirmed_at: orderRow.confirmed_at || new Date().toISOString()
     })
     .eq('reference', reference);
 
-  if (orderRow.user_id && orderRow.course_id) {
+  if (targetUserId && orderRow.course_id) {
     await supabaseAdmin.from('enrollments').upsert(
       {
-        user_id: orderRow.user_id,
+        user_id: targetUserId,
         course_id: orderRow.course_id,
         granted_by: `payment:${orderRow.payment_provider}`
       },
@@ -302,6 +358,32 @@ function sanitizeStorageObjectPath(rawPath: string): string | null {
     return null;
   }
   return normalized;
+}
+
+function safeConstantTimeEqual(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+const CANONICAL_BRAND_ASSETS = [
+  'hero_faith_ariola_academy_1794341068588',
+  'course_method_faith_ariola_1794341070404',
+  'course_virtual_fashion_ai_1794341069864',
+  'course_cinema_storytelling_1794341071738'
+];
+
+function canonicalizeBrandImageForStorage(rawPath: string | undefined | null): string {
+  const trimmed = String(rawPath || '').trim();
+  if (!trimmed || trimmed.startsWith('data:')) return trimmed;
+  const fileName = trimmed.split('#')[0].split('?')[0].split('/').pop() || '';
+  for (const base of CANONICAL_BRAND_ASSETS) {
+    const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`^${escaped}(?:-[A-Za-z0-9_-]+)?\\.[a-z0-9]+$`, 'i').test(fileName)) {
+      return `/src/assets/images/${base}.jpg`;
+    }
+  }
+  return trimmed;
 }
 
 async function startServer() {
@@ -357,7 +439,7 @@ async function startServer() {
 
   // 3b. Public Contact Form Submission (persisted server-side & in Supabase contact_messages when available)
   app.post('/api/public/contact', async (req, res) => {
-    const { id, name, email, phone, subject, message } = req.body || {};
+    const { name, email, phone, subject, message } = req.body || {};
     const cleanName = String(name || '').trim().slice(0, 120);
     const cleanEmail = String(email || '').trim().slice(0, 160);
     const cleanPhone = phone ? String(phone).trim().slice(0, 40) : undefined;
@@ -370,7 +452,7 @@ async function startServer() {
     }
 
     const item: ServerContactMessage = {
-      id: id ? String(id) : `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       name: cleanName,
       email: cleanEmail,
       phone: cleanPhone,
@@ -386,19 +468,16 @@ async function startServer() {
     if (supabaseAdmin) {
       await supabaseAdmin
         .from('contact_messages')
-        .upsert(
-          {
-            id: item.id,
-            name: item.name,
-            email: item.email,
-            phone: item.phone || null,
-            subject: item.subject,
-            message: item.message,
-            status: 'new',
-            created_at: item.createdAt
-          },
-          { onConflict: 'id' }
-        )
+        .insert({
+          id: item.id,
+          name: item.name,
+          email: item.email,
+          phone: item.phone || null,
+          subject: item.subject,
+          message: item.message,
+          status: 'new',
+          created_at: item.createdAt
+        })
         .then(() => undefined, () => undefined);
     }
 
@@ -407,8 +486,8 @@ async function startServer() {
 
   // 3c. Public Coaching / Mentorship Request Submission (persists server-side to Supabase when active)
   app.post('/api/public/coaching-request', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
     const {
-      id,
       userId,
       userName,
       userEmail,
@@ -430,27 +509,30 @@ async function startServer() {
       return;
     }
 
-    const reqId = id ? String(id) : `req-${Date.now()}`;
+    const reqId = `req-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const validType = type === 'collective' ? 'collective' : 'individual';
+    const resolvedUserId =
+      caller.userId && /^[0-9a-f-]{36}$/i.test(caller.userId)
+        ? caller.userId
+        : userId && /^[0-9a-f-]{36}$/i.test(String(userId))
+        ? String(userId)
+        : null;
 
     if (supabaseAdmin) {
       await supabaseAdmin
         .from('coaching_requests')
-        .upsert(
-          {
-            id: reqId,
-            user_id: userId && /^[0-9a-f-]{36}$/i.test(String(userId)) ? String(userId) : null,
-            user_name: cleanName,
-            user_email: cleanEmail,
-            user_phone: cleanPhone,
-            type: validType,
-            program_title: String(programTitle || 'Accompagnement DJIFFA ACADEMY').slice(0, 200),
-            need_description: cleanNeed,
-            preferred_date: cleanDate,
-            status: 'pending'
-          },
-          { onConflict: 'id' }
-        )
+        .insert({
+          id: reqId,
+          user_id: resolvedUserId,
+          user_name: cleanName,
+          user_email: cleanEmail,
+          user_phone: cleanPhone,
+          type: validType,
+          program_title: String(programTitle || 'Accompagnement DJIFFA ACADEMY').slice(0, 200),
+          need_description: cleanNeed,
+          preferred_date: cleanDate,
+          status: 'pending'
+        })
         .then(() => undefined, () => undefined);
     }
 
@@ -501,7 +583,8 @@ async function startServer() {
     }
     const msgId = String(req.params.id || '');
     const { status, adminNotes } = req.body || {};
-    const validStatus = status === 'read' || status === 'replied' ? status : 'new';
+    const validStatus: ServerContactMessage['status'] =
+      status === 'read' || status === 'replied' || status === 'archived' ? status : 'new';
 
     const idx = recentContactMessages.findIndex((m) => m.id === msgId);
     if (idx >= 0) {
@@ -512,18 +595,36 @@ async function startServer() {
       };
     }
 
+    let cloudSynced = false;
+    let warning: string | undefined;
+
     if (supabaseAdmin) {
-      await supabaseAdmin
+      const { error: updateErr } = await supabaseAdmin
         .from('contact_messages')
         .update({
           status: validStatus,
           admin_notes: adminNotes !== undefined ? String(adminNotes) : null
         })
-        .eq('id', msgId)
-        .then(() => undefined, () => undefined);
+        .eq('id', msgId);
+
+      if (!updateErr) {
+        cloudSynced = true;
+      } else if (
+        validStatus === 'archived' &&
+        (updateErr.code === '23514' || /check constraint/i.test(updateErr.message))
+      ) {
+        warning =
+          'Statut « archived » appliqué localement. Exécutez la mise à jour optionnelle dans supabase/migrations_optional_v2.sql pour autoriser « archived » dans Supabase.';
+      } else if (
+        updateErr.code !== '42P01' &&
+        updateErr.code !== 'PGRST205' &&
+        !/does not exist|schema cache/i.test(updateErr.message)
+      ) {
+        warning = `Synchronisation Supabase contact_messages : ${updateErr.message}`;
+      }
     }
 
-    res.json({ ok: true });
+    res.json({ ok: true, cloudSynced, ...(warning ? { warning } : {}) });
   });
 
   app.get('/api/admin/payment-events', async (req, res) => {
@@ -552,8 +653,9 @@ async function startServer() {
       promoCode
     } = req.body || {};
 
-    if (!reference || amount === undefined || !currency || !customerEmail) {
-      res.status(400).json({ ok: false, error: 'Paramètres de commande incomplets.' });
+    const numericAmount = Number(amount);
+    if (!reference || !courseId || !Number.isFinite(numericAmount) || numericAmount <= 0 || !currency || !customerEmail) {
+      res.status(400).json({ ok: false, error: 'Paramètres de commande incomplets ou montant invalide.' });
       return;
     }
 
@@ -568,19 +670,161 @@ async function startServer() {
       return;
     }
 
-    // Record pending order server-side in Supabase when connected
-    if (supabaseAdmin && courseId) {
-      await supabaseAdmin.from('orders').upsert(
+    if (status.keyModeAligned === false) {
+      res.status(503).json({
+        ok: false,
+        provider: status.provider,
+        mode: status.mode,
+        error: status.message
+      });
+      return;
+    }
+
+    const normalizedCurrency = currency === 'EUR' ? 'EUR' : currency === 'USD' ? 'USD' : 'XOF';
+    let verifiedAmount = Math.round(numericAmount);
+    const caller = await resolveCallerAuth(req);
+    const resolvedUserId =
+      caller.userId && /^[0-9a-f-]{36}$/i.test(caller.userId)
+        ? caller.userId
+        : userId && /^[0-9a-f-]{36}$/i.test(String(userId))
+        ? String(userId)
+        : null;
+
+    // Validate authoritative course price & promo code from Supabase (never silently bypass on DB errors)
+    if (supabaseAdmin) {
+      let courseRow: {
+        id: string;
+        price_xof: number;
+        price_eur: number;
+        price_usd: number;
+        promo_active?: boolean | null;
+        promo_price_xof?: number | null;
+        promo_price_eur?: number | null;
+        promo_price_usd?: number | null;
+      } | null = null;
+
+      const extRes = await supabaseAdmin
+        .from('courses')
+        .select('id, price_xof, price_eur, price_usd, promo_active, promo_price_xof, promo_price_eur, promo_price_usd')
+        .eq('id', String(courseId))
+        .maybeSingle();
+
+      if (extRes.error) {
+        if (/column|schema cache|42703|PGRST204/i.test(extRes.error.message)) {
+          const coreRes = await supabaseAdmin
+            .from('courses')
+            .select('id, price_xof, price_eur, price_usd')
+            .eq('id', String(courseId))
+            .maybeSingle();
+          if (coreRes.error) {
+            res.status(503).json({
+              ok: false,
+              error: 'Impossible de vérifier le tarif officiel de la formation auprès de Supabase.'
+            });
+            return;
+          }
+          courseRow = coreRes.data;
+        } else {
+          res.status(503).json({
+            ok: false,
+            error: 'Impossible de vérifier le tarif officiel de la formation auprès de Supabase.'
+          });
+          return;
+        }
+      } else {
+        courseRow = extRes.data;
+      }
+
+      if (!courseRow) {
+        res.status(400).json({
+          ok: false,
+          error: 'Formation introuvable ou non encore synchronisée dans la base officielle Supabase.'
+        });
+        return;
+      }
+
+      const promoEnabled = Boolean(courseRow.promo_active);
+      const basePrice =
+        normalizedCurrency === 'EUR'
+          ? promoEnabled && courseRow.promo_price_eur
+            ? Number(courseRow.promo_price_eur)
+            : Number(courseRow.price_eur)
+          : normalizedCurrency === 'USD'
+          ? promoEnabled && courseRow.promo_price_usd
+            ? Number(courseRow.promo_price_usd)
+            : Number(courseRow.price_usd)
+          : promoEnabled && courseRow.promo_price_xof
+          ? Number(courseRow.promo_price_xof)
+          : Number(courseRow.price_xof);
+
+      let discountRatio = 0;
+      if (promoCode) {
+        const { data: promoRow, error: promoErr } = await supabaseAdmin
+          .from('promo_codes')
+          .select('discount_percent, is_active')
+          .ilike('code', String(promoCode).trim())
+          .maybeSingle();
+        if (promoErr) {
+          res.status(503).json({
+            ok: false,
+            error: 'Impossible de vérifier le code promotionnel auprès de Supabase.'
+          });
+          return;
+        }
+        if (promoRow && promoRow.is_active) {
+          discountRatio = Math.min(95, Math.max(0, Number(promoRow.discount_percent || 0))) / 100;
+        }
+      }
+
+      const expectedServerAmount = Math.max(0, Math.round(basePrice * (1 - discountRatio)));
+      if (!Number.isFinite(expectedServerAmount) || expectedServerAmount <= 0) {
+        res.status(400).json({
+          ok: false,
+          error: 'Tarif officiel de la formation invalide côté base de données.'
+        });
+        return;
+      }
+      if (verifiedAmount + 2 < expectedServerAmount) {
+        res.status(400).json({
+          ok: false,
+          error: 'Le montant transmis ne correspond pas au tarif officiel de la formation.'
+        });
+        return;
+      }
+      verifiedAmount = expectedServerAmount;
+
+      const { data: existingOrder, error: existingOrderErr } = await supabaseAdmin
+        .from('orders')
+        .select('status')
+        .eq('reference', String(reference))
+        .maybeSingle();
+
+      if (existingOrderErr) {
+        res.status(503).json({
+          ok: false,
+          error: 'Impossible de vérifier la référence de commande dans Supabase.'
+        });
+        return;
+      }
+      if (existingOrder?.status === 'confirmed') {
+        res.status(409).json({
+          ok: false,
+          error: 'Cette référence de commande est déjà confirmée.'
+        });
+        return;
+      }
+
+      const { error: orderUpsertErr } = await supabaseAdmin.from('orders').upsert(
         {
-          id: `ord-${Date.now()}`,
+          id: `ord-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
           reference: String(reference),
-          user_id: userId && /^[0-9a-f-]{36}$/i.test(String(userId)) ? String(userId) : null,
+          user_id: resolvedUserId,
           user_name: String(customerName || 'Apprenant'),
           user_email: String(customerEmail),
           course_id: String(courseId),
           course_title: String(description || 'Formation DJIFFA ACADEMY'),
-          amount: Math.round(Number(amount)),
-          currency: currency === 'EUR' ? 'EUR' : currency === 'USD' ? 'USD' : 'XOF',
+          amount: verifiedAmount,
+          currency: normalizedCurrency,
           payment_method: String(paymentMethod || 'mtn_momo'),
           payment_provider:
             status.provider === 'fedapay' ? 'FedaPay' : status.provider === 'kkiapay' ? 'KKiaPay' : 'CinetPay',
@@ -591,6 +835,14 @@ async function startServer() {
         },
         { onConflict: 'reference' }
       );
+
+      if (orderUpsertErr) {
+        res.status(500).json({
+          ok: false,
+          error: `Impossible d’enregistrer la commande avant paiement : ${orderUpsertErr.message}`
+        });
+        return;
+      }
     }
 
     try {
@@ -606,8 +858,8 @@ async function startServer() {
           },
           body: JSON.stringify({
             description: description || `Formation DJIFFA ACADEMY - ${reference}`,
-            amount: Math.round(Number(amount)),
-            currency: { iso: currency === 'EUR' ? 'EUR' : currency === 'USD' ? 'USD' : 'XOF' },
+            amount: verifiedAmount,
+            currency: { iso: normalizedCurrency },
             callback_url: `${appUrl}/?payment_ref=${encodeURIComponent(reference)}`,
             custom_metadata: { reference, paymentMethod, courseId },
             customer: {
@@ -651,14 +903,15 @@ async function startServer() {
           provider: 'fedapay',
           event: 'create_session',
           status: 'pending',
-          detail: `Session créée (${currency} ${Math.round(Number(amount))})`
+          detail: `Session créée (${normalizedCurrency} ${verifiedAmount})`
         });
 
         res.json({
           ok: true,
           provider: 'fedapay',
           transactionId: tx?.id,
-          paymentUrl
+          paymentUrl,
+          verifiedAmount
         });
         return;
       }
@@ -671,8 +924,8 @@ async function startServer() {
             apikey: process.env.CINETPAY_API_KEY,
             site_id: process.env.CINETPAY_SITE_ID,
             transaction_id: reference,
-            amount: Math.round(Number(amount)),
-            currency: currency === 'EUR' ? 'EUR' : currency === 'USD' ? 'USD' : 'XOF',
+            amount: verifiedAmount,
+            currency: normalizedCurrency,
             description: description || `Formation DJIFFA ACADEMY`,
             notify_url: `${appUrl}/api/payments/webhook`,
             return_url: `${appUrl}/?payment_ref=${encodeURIComponent(reference)}`,
@@ -695,7 +948,8 @@ async function startServer() {
           ok: true,
           provider: 'cinetpay',
           paymentUrl: data.data?.payment_url || null,
-          paymentToken: data.data?.payment_token || null
+          paymentToken: data.data?.payment_token || null,
+          verifiedAmount
         });
         return;
       }
@@ -707,6 +961,7 @@ async function startServer() {
         publicKey: status.publicKey,
         sandbox: status.mode === 'sandbox',
         reference,
+        verifiedAmount,
         callbackUrl: `${appUrl}/?payment_ref=${encodeURIComponent(reference)}`
       });
     } catch (err) {
@@ -740,15 +995,57 @@ async function startServer() {
       return;
     }
 
+    let storedOrderAmount: number | null = null;
+    let storedOrderCurrency: string | null = null;
+    if (supabaseAdmin) {
+      const { data: orderRow, error: orderErr } = await supabaseAdmin
+        .from('orders')
+        .select('amount, currency, status')
+        .eq('reference', String(reference))
+        .maybeSingle();
+      if (orderErr) {
+        res.status(503).json({ ok: false, error: 'Impossible de contrôler la commande auprès de Supabase.' });
+        return;
+      }
+      if (orderRow?.status === 'confirmed') {
+        processedTransactions.set(String(reference), {
+          status: 'confirmed',
+          verifiedAt: new Date().toISOString(),
+          provider: status.provider
+        });
+        res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
+        return;
+      }
+      if (orderRow && typeof orderRow.amount === 'number') {
+        storedOrderAmount = orderRow.amount;
+        storedOrderCurrency = orderRow.currency || null;
+      }
+    }
+
     try {
       if (status.provider === 'fedapay' && transactionId) {
         const baseUrl = status.mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
         const response = await fetch(`${baseUrl}/transactions/${encodeURIComponent(String(transactionId))}`, {
           headers: { Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}` }
         });
-        const data = (await response.json()) as { 'v1/transaction'?: { status?: string } };
-        const txStatus = data['v1/transaction']?.status;
-        if (txStatus === 'approved') {
+        const data = (await response.json()) as {
+          'v1/transaction'?: {
+            status?: string;
+            amount?: number;
+            currency?: { iso?: string };
+            custom_metadata?: { reference?: string };
+          };
+        };
+        const tx = data['v1/transaction'];
+        const txStatus = tx?.status;
+        const metadataRef = tx?.custom_metadata?.reference;
+        const refMatches = !metadataRef || String(metadataRef) === String(reference);
+        const amountMatches =
+          storedOrderAmount === null || (tx?.amount !== undefined && Number(tx.amount) + 2 >= storedOrderAmount);
+        const currencyMatches =
+          !storedOrderCurrency || !tx?.currency?.iso || String(tx.currency.iso).toUpperCase() === storedOrderCurrency;
+
+        if (txStatus === 'approved' && refMatches && amountMatches && currencyMatches) {
           processedTransactions.set(String(reference), {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
@@ -781,8 +1078,10 @@ async function startServer() {
           },
           body: JSON.stringify({ transactionId: String(transactionId) })
         });
-        const data = (await response.json()) as { status?: string };
-        if (data.status === 'SUCCESS') {
+        const data = (await response.json()) as { status?: string; amount?: number };
+        const amountMatches =
+          storedOrderAmount === null || (data.amount !== undefined && Number(data.amount) + 2 >= storedOrderAmount);
+        if (data.status === 'SUCCESS' && amountMatches) {
           processedTransactions.set(String(reference), {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
@@ -813,8 +1112,16 @@ async function startServer() {
             transaction_id: reference
           })
         });
-        const data = (await response.json()) as { code?: string; data?: { status?: string } };
-        if (data.code === '00' && data.data?.status === 'ACCEPTED') {
+        const data = (await response.json()) as {
+          code?: string;
+          data?: { status?: string; amount?: number | string; currency?: string };
+        };
+        const amountMatches =
+          storedOrderAmount === null ||
+          (data.data?.amount !== undefined && Number(data.data.amount) + 2 >= storedOrderAmount);
+        const currencyMatches =
+          !storedOrderCurrency || !data.data?.currency || String(data.data.currency).toUpperCase() === storedOrderCurrency;
+        if (data.code === '00' && data.data?.status === 'ACCEPTED' && amountMatches && currencyMatches) {
           processedTransactions.set(String(reference), {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
@@ -847,38 +1154,75 @@ async function startServer() {
     const status = getServerPaymentStatus();
     const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
 
-    if (status.provider === 'fedapay' && process.env.FEDAPAY_WEBHOOK_SECRET) {
-      const sig = req.headers['x-fedapay-signature'] as string | undefined;
-      if (!sig) {
-        res.status(401).json({ ok: false, error: 'Signature webhook FedaPay manquante.' });
-        return;
-      }
-      const expected = crypto.createHmac('sha256', process.env.FEDAPAY_WEBHOOK_SECRET).update(rawBody).digest('hex');
-      if (!sig.includes(expected)) {
-        res.status(403).json({ ok: false, error: 'Signature webhook FedaPay invalide.' });
-        return;
+    if (status.provider === 'fedapay') {
+      const fedaSecret = process.env.FEDAPAY_WEBHOOK_SECRET || '';
+      if (!fedaSecret) {
+        if (isProduction && status.configured) {
+          res.status(401).json({ ok: false, error: 'FEDAPAY_WEBHOOK_SECRET manquant côté serveur.' });
+          return;
+        }
+      } else {
+        const sig = req.headers['x-fedapay-signature'] as string | undefined;
+        if (!sig) {
+          res.status(401).json({ ok: false, error: 'Signature webhook FedaPay manquante.' });
+          return;
+        }
+        const timestampMatch = sig.match(/t=([^,]+)/);
+        const signatureMatch = sig.match(/s=([a-f0-9]+)/i);
+        const expectedPlain = crypto.createHmac('sha256', fedaSecret).update(rawBody).digest('hex');
+        const expectedTimestamped = timestampMatch
+          ? crypto.createHmac('sha256', fedaSecret).update(`${timestampMatch[1]}.${rawBody}`).digest('hex')
+          : '';
+        const providedHex = signatureMatch ? signatureMatch[1] : sig.trim();
+        const sigValid =
+          safeConstantTimeEqual(providedHex.toLowerCase(), expectedPlain.toLowerCase()) ||
+          (expectedTimestamped !== '' &&
+            safeConstantTimeEqual(providedHex.toLowerCase(), expectedTimestamped.toLowerCase()));
+        if (!sigValid) {
+          res.status(403).json({ ok: false, error: 'Signature webhook FedaPay invalide.' });
+          return;
+        }
       }
     }
 
-    if (status.provider === 'cinetpay' && process.env.CINETPAY_SECRET_KEY) {
-      const xToken = req.headers['x-token'] as string | undefined;
-      if (xToken) {
-        const expected = crypto
-          .createHmac('sha256', process.env.CINETPAY_SECRET_KEY)
-          .update(rawBody)
-          .digest('hex');
-        if (xToken !== expected) {
+    if (status.provider === 'cinetpay') {
+      const cinetSecret = process.env.CINETPAY_SECRET_KEY || '';
+      if (!cinetSecret) {
+        if (isProduction && status.configured) {
+          res.status(401).json({ ok: false, error: 'CINETPAY_SECRET_KEY manquant côté serveur.' });
+          return;
+        }
+      } else {
+        const xToken = req.headers['x-token'] as string | undefined;
+        if (!xToken) {
+          res.status(401).json({ ok: false, error: 'Signature webhook CinetPay (x-token) manquante.' });
+          return;
+        }
+        const expected = crypto.createHmac('sha256', cinetSecret).update(rawBody).digest('hex');
+        if (!safeConstantTimeEqual(xToken.trim().toLowerCase(), expected.toLowerCase())) {
           res.status(403).json({ ok: false, error: 'Signature webhook CinetPay invalide.' });
           return;
         }
       }
     }
 
-    if (status.provider === 'kkiapay' && process.env.KKIAPAY_SECRET) {
-      const xSecret = req.headers['x-kkiapay-secret'] as string | undefined;
-      if (xSecret && xSecret !== process.env.KKIAPAY_SECRET) {
-        res.status(403).json({ ok: false, error: 'Secret webhook KKiaPay invalide.' });
-        return;
+    if (status.provider === 'kkiapay') {
+      const kkiaSecret = process.env.KKIAPAY_SECRET || '';
+      if (!kkiaSecret) {
+        if (isProduction && status.configured) {
+          res.status(401).json({ ok: false, error: 'KKIAPAY_SECRET manquant côté serveur.' });
+          return;
+        }
+      } else {
+        const xSecret = req.headers['x-kkiapay-secret'] as string | undefined;
+        if (!xSecret) {
+          res.status(401).json({ ok: false, error: 'Secret webhook KKiaPay manquant.' });
+          return;
+        }
+        if (!safeConstantTimeEqual(xSecret.trim(), kkiaSecret)) {
+          res.status(403).json({ ok: false, error: 'Secret webhook KKiaPay invalide.' });
+          return;
+        }
       }
     }
 
@@ -916,6 +1260,25 @@ async function startServer() {
         if (processedTransactions.get(cleanRef)?.status === 'confirmed') {
           res.json({ ok: true, idempotent: true });
           return;
+        }
+        const rawWebhookAmount = req.body?.entity?.amount ?? req.body?.cpm_amount ?? req.body?.amount;
+        if (supabaseAdmin && rawWebhookAmount !== undefined && Number.isFinite(Number(rawWebhookAmount))) {
+          const { data: storedOrder } = await supabaseAdmin
+            .from('orders')
+            .select('amount')
+            .eq('reference', cleanRef)
+            .maybeSingle();
+          if (storedOrder && typeof storedOrder.amount === 'number' && Number(rawWebhookAmount) + 2 < storedOrder.amount) {
+            recordPaymentEvent({
+              reference: cleanRef,
+              provider: status.provider,
+              event: 'webhook_amount_mismatch',
+              status: 'failed',
+              detail: `Montant webhook (${rawWebhookAmount}) inférieur à la commande (${storedOrder.amount})`
+            });
+            res.status(400).json({ ok: false, error: 'Montant webhook incohérent avec la commande.' });
+            return;
+          }
         }
         processedTransactions.set(cleanRef, {
           status: 'confirmed',
@@ -995,7 +1358,15 @@ async function startServer() {
   app.post('/api/auth/admin-verify', (req, res) => {
     const { email, accessCode } = req.body || {};
     const expectedEmail = (process.env.ADMIN_EMAIL || 'faith.ariola@djiffa-agency.com').toLowerCase();
-    const expectedCode = process.env.ADMIN_ACCESS_CODE || '';
+    const expectedCode = (process.env.ADMIN_ACCESS_CODE || '').trim();
+
+    if (isProduction && !expectedCode) {
+      res.status(503).json({
+        ok: false,
+        error: 'Configuration sécurité incomplète : définissez ADMIN_ACCESS_CODE dans les variables d’environnement de production.'
+      });
+      return;
+    }
 
     if (!email || String(email).toLowerCase().trim() !== expectedEmail) {
       res.status(401).json({ ok: false, error: 'Identifiant administratrice incorrect.' });
@@ -1003,7 +1374,7 @@ async function startServer() {
     }
 
     const validCode = expectedCode || 'DJIFFA-ADMIN';
-    if (String(accessCode || '') !== validCode) {
+    if (!safeConstantTimeEqual(String(accessCode || ''), validCode)) {
       res.status(401).json({ ok: false, error: 'Code d’accès administratrice invalide.' });
       return;
     }
@@ -1170,7 +1541,7 @@ async function startServer() {
           price_eur: c.priceEUR,
           price_usd: c.priceUSD,
           original_price_xof: c.originalPriceXOF || null,
-          cover_image: c.coverImage,
+          cover_image: canonicalizeBrandImageForStorage(c.coverImage),
           is_featured: Boolean(c.isFeatured),
           is_published: Boolean(c.isPublished),
           certificate_eligible: Boolean(c.certificateEligible),
@@ -1414,22 +1785,33 @@ async function startServer() {
         }
         case 'update_contact_message_status': {
           const msgId = String(payload?.id || '');
+          const nextStatus =
+            payload?.status === 'read' || payload?.status === 'replied' || payload?.status === 'archived'
+              ? payload.status
+              : 'new';
           const idx = recentContactMessages.findIndex((m) => m.id === msgId);
           if (idx >= 0) {
             recentContactMessages[idx] = {
               ...recentContactMessages[idx],
-              status: payload?.status || recentContactMessages[idx].status,
+              status: nextStatus,
               adminNotes: payload?.adminNotes !== undefined ? payload.adminNotes : recentContactMessages[idx].adminNotes
             };
           }
-          await supabaseAdmin
+          const { error: msgUpdateErr } = await supabaseAdmin
             .from('contact_messages')
             .update({
-              status: payload?.status,
+              status: nextStatus,
               admin_notes: payload?.adminNotes ?? null
             })
-            .eq('id', msgId)
-            .then(() => undefined, () => undefined);
+            .eq('id', msgId);
+          if (
+            msgUpdateErr &&
+            !(nextStatus === 'archived' && (msgUpdateErr.code === '23514' || /check constraint/i.test(msgUpdateErr.message))) &&
+            msgUpdateErr.code !== '42P01' &&
+            msgUpdateErr.code !== 'PGRST205'
+          ) {
+            throw new Error(msgUpdateErr.message);
+          }
           break;
         }
         case 'grant_access':
@@ -1524,9 +1906,12 @@ async function startServer() {
     const serverUrlSet = Boolean((process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim());
     const serviceRoleKeySet = Boolean((process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim());
 
-    const fedaPubSet = Boolean((process.env.FEDAPAY_PUBLIC_KEY || '').trim());
-    const fedaSecSet = Boolean((process.env.FEDAPAY_SECRET_KEY || '').trim());
+    const fedaPubRaw = (process.env.FEDAPAY_PUBLIC_KEY || '').trim();
+    const fedaSecRaw = (process.env.FEDAPAY_SECRET_KEY || '').trim();
+    const fedaPubSet = Boolean(fedaPubRaw);
+    const fedaSecSet = Boolean(fedaSecRaw);
     const fedaWebhookSet = Boolean((process.env.FEDAPAY_WEBHOOK_SECRET || '').trim());
+    const fedaKeyInspection = inspectFedaPayKeys(fedaPubRaw, fedaSecRaw, payment.mode);
 
     const kkiaPubSet = Boolean((process.env.KKIAPAY_PUBLIC_KEY || '').trim());
     const kkiaPrivSet = Boolean((process.env.KKIAPAY_PRIVATE_KEY || '').trim());
@@ -1581,7 +1966,9 @@ async function startServer() {
             publicKeySet: fedaPubSet,
             secretKeySet: fedaSecSet,
             webhookSecretSet: fedaWebhookSet,
-            configured: fedaPubSet && fedaSecSet
+            configured: fedaPubSet && fedaSecSet,
+            keyEnvironment: fedaKeyInspection.keyEnvironment,
+            keyModeAligned: fedaKeyInspection.keyModeAligned
           },
           kkiapay: {
             publicKeySet: kkiaPubSet,
@@ -1754,7 +2141,7 @@ async function startServer() {
     const provider: 'fedapay' | 'kkiapay' | 'cinetpay' =
       reqProvider === 'kkiapay' ? 'kkiapay' : reqProvider === 'cinetpay' ? 'cinetpay' : 'fedapay';
     const mode: 'sandbox' | 'live' =
-      (process.env.PAYMENT_MODE || 'sandbox').toLowerCase() === 'live' ? 'live' : 'sandbox';
+      (process.env.PAYMENT_MODE || 'sandbox').trim().toLowerCase() === 'live' ? 'live' : 'sandbox';
 
     try {
       if (provider === 'fedapay') {
@@ -1769,6 +2156,16 @@ async function startServer() {
           });
           return;
         }
+        const keyCheck = inspectFedaPayKeys(pub, sec, mode);
+        if (!keyCheck.keyModeAligned) {
+          res.json({
+            ok: false,
+            provider,
+            status: 'error',
+            message: `Incohérence FedaPay : PAYMENT_MODE=${mode}, mais les clés configurées sont de type ${keyCheck.keyEnvironment.toUpperCase()}.`
+          });
+          return;
+        }
         const baseUrl = mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
         const probe = await fetch(`${baseUrl}/transactions?per_page=1`, {
           method: 'GET',
@@ -1779,7 +2176,7 @@ async function startServer() {
             ok: true,
             provider,
             status: 'completed',
-            message: `API FedaPay (${mode === 'live' ? 'Live' : 'Sandbox'}) joignable et clé secrète acceptée.`
+            message: `API FedaPay (${mode === 'live' ? 'Live' : 'Sandbox'}) joignable et clés ${keyCheck.keyEnvironment} acceptées.`
           });
           return;
         }

@@ -8,6 +8,9 @@ import React, { useState, useEffect } from 'react';
 import { Course, PaymentMethod, Order } from '../types';
 import { useApp } from '../context/AppContext';
 import { getCoursePricing, getCourseAmountInCurrency } from '../lib/pricing';
+import { resolveAssetImageUrl } from '../lib/assets';
+import { safeExternalUrl } from '../lib/media';
+import { getSupabaseAccessToken } from '../lib/supabase';
 import {
   X,
   ShieldCheck,
@@ -207,9 +210,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
       // Real server payment session initialization
       if (paymentConfig.serverConfigured && !forceDemoTest) {
         const ref = `DJF-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
+        const sessionHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        const supabaseToken = await getSupabaseAccessToken();
+        if (supabaseToken) {
+          sessionHeaders['Authorization'] = `Bearer ${supabaseToken}`;
+        }
         const sessionRes = await fetch('/api/payments/create-session', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: sessionHeaders,
           body: JSON.stringify({
             reference: ref,
             amount: finalAmount,
@@ -311,16 +319,18 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         {/* Clear Server Gateway Status Notice */}
         <div
           className={`px-5 py-2.5 border-b flex items-center justify-between text-xs ${
-            paymentConfig.serverConfigured
+            paymentConfig.serverConfigured && !paymentConfig.isTestMode
               ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-              : 'bg-amber-950/30 border-[#D4AF37]/30 text-[#F3E5AB]'
+              : 'bg-amber-950/40 border-[#D4AF37]/40 text-[#F3E5AB]'
           }`}
         >
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 shrink-0" />
             <span>
               {paymentConfig.serverConfigured
-                ? `Passerelle active : ${paymentConfig.activeProvider.toUpperCase()} (${paymentConfig.isTestMode ? 'Sandbox' : 'Production'})`
+                ? paymentConfig.isTestMode
+                  ? `Mode Sandbox (${paymentConfig.activeProvider.toUpperCase()}) — Environnement de test, aucun débit réel`
+                  : `Passerelle active : ${paymentConfig.activeProvider.toUpperCase()} (Production)`
                 : 'Paiement non configuré côté serveur — Mode Démonstration (aucun débit réel)'}
             </span>
           </div>
@@ -332,7 +342,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <img
-                  src={course.coverImage}
+                  src={resolveAssetImageUrl(course.coverImage)}
                   alt={course.title}
                   className="w-12 h-12 rounded-lg object-cover border border-zinc-700 shrink-0"
                 />
@@ -478,23 +488,37 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
 
             {/* External hosted checkout link & live verification panel */}
             {externalPaymentUrl && pendingRef && (
-              <div className="p-4 rounded-xl bg-emerald-950/50 border border-emerald-600/60 space-y-3 text-xs">
+              <div
+                className={`p-4 rounded-xl border space-y-3 text-xs ${
+                  paymentConfig.isTestMode
+                    ? 'bg-amber-950/40 border-[#D4AF37]/60'
+                    : 'bg-emerald-950/50 border-emerald-600/60'
+                }`}
+              >
                 <div className="flex items-center justify-between gap-2">
-                  <p className="font-semibold text-emerald-300">
-                    Session sécurisée {paymentConfig.activeProvider.toUpperCase()} prête
+                  <p className={`font-semibold ${paymentConfig.isTestMode ? 'text-[#F3E5AB]' : 'text-emerald-300'}`}>
+                    {paymentConfig.isTestMode
+                      ? `Session Sandbox ${paymentConfig.activeProvider.toUpperCase()} prête (Test — aucun débit réel)`
+                      : `Session sécurisée ${paymentConfig.activeProvider.toUpperCase()} prête`}
                   </p>
                   <span className="font-mono text-[11px] text-zinc-300">Réf : {pendingRef}</span>
                 </div>
 
-                <a
-                  href={externalPaymentUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold"
-                >
-                  <span>1. Ouvrir la page de paiement officielle</span>
-                  <ExternalLink className="w-4 h-4" />
-                </a>
+                {safeExternalUrl(externalPaymentUrl) && (
+                  <a
+                    href={safeExternalUrl(externalPaymentUrl) || '#'}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold"
+                  >
+                    <span>
+                      {paymentConfig.isTestMode
+                        ? `1. Ouvrir la page de test Sandbox (${paymentConfig.activeProvider.toUpperCase()})`
+                        : '1. Ouvrir la page de paiement officielle'}
+                    </span>
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                )}
 
                 <div className="pt-2 border-t border-emerald-800/50 space-y-2">
                   {paymentConfig.activeProvider !== 'cinetpay' && (
@@ -523,7 +547,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
             <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <img
-                  src={course.coverImage}
+                  src={resolveAssetImageUrl(course.coverImage)}
                   alt={course.title}
                   className="w-14 h-14 rounded-lg object-cover border border-zinc-700 shrink-0"
                 />
@@ -687,6 +711,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               </div>
             )}
 
+            {paymentConfig.serverConfigured && paymentConfig.isTestMode && (
+              <div className="p-3.5 rounded-xl bg-amber-950/30 border border-[#D4AF37]/40 text-[11px] text-zinc-300 space-y-1">
+                <p className="font-semibold text-[#F3E5AB]">
+                  Mode Test Sandbox actif ({paymentConfig.activeProvider.toUpperCase()})
+                </p>
+                <p className="text-zinc-400">
+                  Vous effectuez un test sur l’environnement Sandbox de {paymentConfig.activeProvider.toUpperCase()}. Aucun vrai portefeuille Mobile Money ni aucune vraie carte bancaire ne sera débité.
+                </p>
+              </div>
+            )}
+
             {!paymentConfig.serverConfigured && (
               <div className="p-3.5 rounded-xl bg-amber-950/30 border border-[#D4AF37]/30 text-[11px] text-zinc-300 space-y-1">
                 <p className="font-semibold text-[#F3E5AB]">
@@ -705,7 +740,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               <ShieldCheck className="w-5 h-5" />
               <span>
                 {paymentConfig.serverConfigured
-                  ? `Payer maintenant · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`
+                  ? paymentConfig.isTestMode
+                    ? `Tester le paiement (Sandbox) · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`
+                    : `Payer maintenant · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`
                   : `Enregistrer une demande / test Démo · ${formatPrice(pricing.activeXOF * (1 - discountRatio))}`}
               </span>
             </button>
@@ -722,7 +759,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
               Vérification de la transaction...
             </h4>
             <p className="text-xs text-zinc-400 max-w-sm mx-auto">
-              Communication avec le serveur DJIFFA ACADEMY ({paymentConfig.serverConfigured ? 'Vérification prestataire' : 'Mode Test / Démonstration'}).
+              Communication avec le serveur DJIFFA ACADEMY (
+              {paymentConfig.serverConfigured
+                ? paymentConfig.isTestMode
+                  ? 'Mode Sandbox — Test'
+                  : 'Vérification prestataire'
+                : 'Mode Test / Démonstration'}
+              ).
             </p>
           </div>
         )}

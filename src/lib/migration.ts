@@ -15,6 +15,7 @@ import {
   CoachingRequest
 } from '../types';
 import { supabase, getSupabaseAccessToken } from './supabase';
+import { canonicalizeAssetImageForStorage } from './assets';
 
 export interface LocalMigrationBundle {
   domains: DomainCategory[];
@@ -108,10 +109,18 @@ export async function migrateCatalogToSupabaseServer(
   if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
   if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
 
+  const normalizedBundle: LocalMigrationBundle = {
+    ...bundle,
+    courses: (bundle.courses || []).map((course) => ({
+      ...course,
+      coverImage: canonicalizeAssetImageForStorage(course.coverImage) || course.coverImage
+    }))
+  };
+
   const res = await fetch('/api/supabase/migrate', {
     method: 'POST',
     headers,
-    body: JSON.stringify(bundle)
+    body: JSON.stringify(normalizedBundle)
   });
 
   return res.json();

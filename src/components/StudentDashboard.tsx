@@ -5,7 +5,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { isSupabaseStorageRef, fetchProtectedSignedMediaUrl } from '../lib/media';
+import { isSupabaseStorageRef, fetchProtectedSignedMediaUrl, safeExternalUrl } from '../lib/media';
+import { resolveAssetImageUrl } from '../lib/assets';
 import { getSupabaseAccessToken } from '../lib/supabase';
 import {
   BookOpen,
@@ -156,8 +157,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     }
 
     if (res.url) {
+      const safeHref = safeExternalUrl(res.url);
+      if (!safeHref) {
+        setResourceStatus('Lien de ressource invalide ou non sécurisé.');
+        setTimeout(() => setResourceStatus(null), 4000);
+        return;
+      }
       const a = document.createElement('a');
-      a.href = res.url;
+      a.href = safeHref;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       a.click();
@@ -337,7 +344,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                     >
                       <div className="aspect-[16/9] relative bg-zinc-900">
                         <img
-                          src={c.coverImage}
+                          src={resolveAssetImageUrl(c.coverImage)}
                           alt={c.title}
                           className="w-full h-full object-cover"
                           referrerPolicy="no-referrer"
@@ -503,8 +510,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                         </p>
                         <div className="flex items-center justify-between text-[11px]">
                           <span className="text-emerald-400">Statut : Enregistré</span>
-                          {sub.link && (
-                            <a href={sub.link} target="_blank" rel="noreferrer" className="text-[#D4AF37] hover:underline">
+                          {safeExternalUrl(sub.link) && (
+                            <a
+                              href={safeExternalUrl(sub.link)!}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="text-[#D4AF37] hover:underline"
+                            >
                               Voir le lien fourni →
                             </a>
                           )}
@@ -523,9 +535,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
               {Object.keys(currentUser.quizScores).length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {Object.entries(currentUser.quizScores).map(([lessonId, qRes]) => {
-                    const matchedCourse = courses.find((c) =>
-                      c.modules.some((m) => m.lessons.some((l) => l.id === lessonId))
-                    );
+                    const isFinalExam = lessonId.startsWith('final-');
+                    const matchedCourse = isFinalExam
+                      ? courses.find((c) => c.id === lessonId.replace(/^final-/, ''))
+                      : courses.find((c) =>
+                          c.modules.some((m) => m.lessons.some((l) => l.id === lessonId))
+                        );
                     const matchedLesson = matchedCourse?.modules
                       .flatMap((m) => m.lessons)
                       .find((l) => l.id === lessonId);
@@ -533,7 +548,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                       <div key={lessonId} className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between gap-3 text-xs">
                         <div>
                           <span className="font-semibold text-slate-100 block">
-                            {matchedLesson ? matchedLesson.title : `Évaluation ${lessonId}`}
+                            {isFinalExam
+                              ? `Examen Final — ${matchedCourse?.title || 'Formation'}`
+                              : matchedLesson
+                              ? matchedLesson.title
+                              : `Évaluation ${lessonId}`}
                           </span>
                           <span className="text-[11px] text-zinc-400">
                             {new Date(qRes.completedAt).toLocaleDateString('fr-FR')}
@@ -716,11 +735,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                     </p>
                     <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-400 pt-2 border-t border-zinc-900 gap-2">
                       <span>Date souhaitée : {req.preferredDate}</span>
-                      {req.meetingLink && (
+                      {safeExternalUrl(req.meetingLink) && (
                         <a
-                          href={req.meetingLink}
+                          href={safeExternalUrl(req.meetingLink)!}
                           target="_blank"
-                          rel="noreferrer"
+                          rel="noreferrer noopener"
                           className="px-3 py-1 rounded bg-[#D4AF37] text-zinc-950 font-bold hover:bg-[#E5C158]"
                         >
                           Lien Visio →

@@ -43,10 +43,17 @@ create table if not exists public.contact_messages (
   phone text,
   subject text not null,
   message text not null,
-  status text not null default 'new' check (status in ('new', 'read', 'replied')),
+  status text not null default 'new' check (status in ('new', 'read', 'replied', 'archived')),
   admin_notes text,
   created_at timestamptz not null default now()
 );
+
+alter table public.contact_messages
+  drop constraint if exists contact_messages_status_check;
+
+alter table public.contact_messages
+  add constraint contact_messages_status_check
+  check (status in ('new', 'read', 'replied', 'archived'));
 
 alter table public.contact_messages enable row level security;
 

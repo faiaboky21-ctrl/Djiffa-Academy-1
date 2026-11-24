@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { Course } from '../types';
 import { useApp } from '../context/AppContext';
 import { getCoursePricing } from '../lib/pricing';
+import { resolveAssetImageUrl } from '../lib/assets';
 import { Clock, BookOpen, CheckCircle, ArrowRight, Video } from 'lucide-react';
 
 interface CourseCardProps {
@@ -32,7 +33,7 @@ export const CourseCard: React.FC<CourseCardProps> = ({ course, onOpenCheckout }
       <div className="relative aspect-[16/9] w-full overflow-hidden bg-zinc-900">
         {!imgError ? (
           <img
-            src={course.coverImage}
+            src={resolveAssetImageUrl(course.coverImage)}
             alt={course.title}
             onError={() => setImgError(true)}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -75,7 +76,7 @@ export const CourseCard: React.FC<CourseCardProps> = ({ course, onOpenCheckout }
             <span aria-hidden="true" className="text-zinc-600">·</span>
             <span className="flex items-center gap-1">
               <BookOpen className="w-3.5 h-3.5 text-zinc-500" />
-              <span>{course.modulesCount} modules</span>
+              <span>{course.modules.length || course.modulesCount} modules</span>
             </span>
             <span aria-hidden="true" className="text-zinc-600">·</span>
             <span>{course.level}</span>

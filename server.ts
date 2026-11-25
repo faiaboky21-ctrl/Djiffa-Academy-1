@@ -2782,7 +2782,7 @@ async function startServer() {
           return;
         }
         const baseUrl = mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
-        const probe = await fetch(`${baseUrl}/transactions?per_page=1`, {
+        const probe = await fetch(`${baseUrl}/currencies`, {
           method: 'GET',
           headers: { Authorization: `Bearer ${sec}`, Accept: 'application/json' }
         });
@@ -2795,14 +2795,37 @@ async function startServer() {
           });
           return;
         }
+        const rawErrBody = await probe.text().catch(() => '');
+        let fedaErrDetail = '';
+        if (rawErrBody) {
+          try {
+            const parsedErr = JSON.parse(rawErrBody) as {
+              message?: string;
+              errors?: Record<string, string[] | string>;
+            };
+            const parts: string[] = [];
+            if (typeof parsedErr.message === 'string' && parsedErr.message.trim()) {
+              parts.push(parsedErr.message.trim());
+            }
+            if (parsedErr.errors && typeof parsedErr.errors === 'object') {
+              for (const [field, val] of Object.entries(parsedErr.errors)) {
+                const msg = Array.isArray(val) ? val.join(', ') : String(val || '');
+                if (msg.trim()) parts.push(`${field}: ${msg.trim()}`);
+              }
+            }
+            fedaErrDetail = parts.join(' — ');
+          } catch {
+            fedaErrDetail = rawErrBody.trim().slice(0, 200);
+          }
+        }
         res.json({
           ok: false,
           provider,
           status: 'error',
           message:
             probe.status === 401 || probe.status === 403
-              ? 'Clé secrète FedaPay refusée (HTTP 401/403). Vérifiez le mode Sandbox vs Live.'
-              : `Réponse API FedaPay inattendue (HTTP ${probe.status}).`
+              ? `Clé secrète FedaPay refusée (HTTP ${probe.status}). Vérifiez le mode Sandbox vs Live.${fedaErrDetail ? ` (${fedaErrDetail})` : ''}`
+              : `Réponse API FedaPay inattendue (HTTP ${probe.status})${fedaErrDetail ? ` : ${fedaErrDetail}` : '.'}`
         });
         return;
       }

@@ -451,13 +451,33 @@ function normalizeFedaPayPhoneNumber(rawPhone?: string | null): { number: string
   }
 
   const hasPlus = compact.startsWith('+');
-  const digitsOnly = compact.replace(/\D/g, '');
+  let digitsOnly = compact.replace(/\D/g, '');
   if (digitsOnly.length < 8) return undefined;
+
+  // Guard against duplicate Benin country prefix (+229 229 ..., 229229...)
+  while (digitsOnly.startsWith('229229')) {
+    const afterDouble = digitsOnly.slice(6);
+    if (
+      afterDouble.length === 8 ||
+      (afterDouble.length === 10 && afterDouble.startsWith('01')) ||
+      afterDouble.startsWith('229')
+    ) {
+      digitsOnly = `229${afterDouble}`;
+    } else {
+      break;
+    }
+  }
 
   if (hasPlus) {
     const matched = FEDAPAY_COUNTRY_BY_DIAL.find((entry) => digitsOnly.startsWith(entry.dial));
     if (matched) {
       const localPart = digitsOnly.slice(matched.dial.length);
+      if (matched.dial === '229') {
+        if (localPart.length === 8 || (localPart.length === 10 && localPart.startsWith('01'))) {
+          return { number: `+229${localPart}`, country: 'bj' };
+        }
+        return undefined;
+      }
       if (localPart.length >= 8) {
         return { number: `+${digitsOnly}`, country: matched.country };
       }
@@ -472,6 +492,7 @@ function normalizeFedaPayPhoneNumber(rawPhone?: string | null): { number: string
     if (localPart.length === 8 || (localPart.length === 10 && localPart.startsWith('01'))) {
       return { number: `+229${localPart}`, country: 'bj' };
     }
+    return undefined;
   }
 
   if (digitsOnly.length === 10 && digitsOnly.startsWith('01')) {
@@ -527,10 +548,17 @@ interface FedaPayTransactionPayload {
   amount?: number | string;
   currency?: { iso?: string };
   custom_metadata?: { reference?: string };
-  last_error?: { message?: string; code?: string } | string;
+  last_error?: {
+    message?: string;
+    code?: string;
+    errors?: Record<string, string[] | string | Record<string, unknown>>;
+  } | string;
   last_error_code?: string;
+  last_error_message?: string;
   status_reason?: string;
+  failure_reason?: string;
   reason?: string;
+  errors?: Record<string, string[] | string | Record<string, unknown>>;
 }
 
 type FedaPayFetchResult =
@@ -570,25 +598,52 @@ async function fetchFedaPayTransaction(transactionId: string, mode: 'sandbox' | 
   }
 }
 
+function appendStructuredErrors(
+  parts: string[],
+  errorsObj?: Record<string, string[] | string | Record<string, unknown>>
+): void {
+  if (!errorsObj || typeof errorsObj !== 'object') return;
+  for (const [field, val] of Object.entries(errorsObj)) {
+    const msg = Array.isArray(val)
+      ? val.join(', ')
+      : val && typeof val === 'object'
+      ? JSON.stringify(val)
+      : String(val || '');
+    const formatted = msg.trim() ? `${field}: ${msg.trim()}` : '';
+    if (formatted && !parts.includes(formatted)) {
+      parts.push(formatted);
+    }
+  }
+}
+
 function extractFedaPayFailureReason(tx: FedaPayTransactionPayload): string | undefined {
   const parts: string[] = [];
-  if (typeof tx.status_reason === 'string' && tx.status_reason.trim()) parts.push(tx.status_reason.trim());
-  if (typeof tx.reason === 'string' && tx.reason.trim() && !parts.includes(tx.reason.trim())) {
-    parts.push(tx.reason.trim());
-  }
-  if (typeof tx.last_error === 'string' && tx.last_error.trim()) {
-    parts.push(tx.last_error.trim());
+  const pushUnique = (value?: string) => {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (trimmed && !parts.includes(trimmed)) {
+      parts.push(trimmed);
+    }
+  };
+
+  pushUnique(tx.status_reason);
+  pushUnique(tx.failure_reason);
+  pushUnique(tx.reason);
+  pushUnique(tx.last_error_message);
+
+  if (typeof tx.last_error === 'string') {
+    pushUnique(tx.last_error);
   } else if (tx.last_error && typeof tx.last_error === 'object') {
-    if (typeof tx.last_error.message === 'string' && tx.last_error.message.trim()) {
-      parts.push(tx.last_error.message.trim());
-    }
+    pushUnique(tx.last_error.message);
     if (typeof tx.last_error.code === 'string' && tx.last_error.code.trim()) {
-      parts.push(`code: ${tx.last_error.code.trim()}`);
+      pushUnique(`code: ${tx.last_error.code.trim()}`);
     }
+    appendStructuredErrors(parts, tx.last_error.errors);
   }
   if (typeof tx.last_error_code === 'string' && tx.last_error_code.trim()) {
-    parts.push(`code: ${tx.last_error_code.trim()}`);
+    pushUnique(`code: ${tx.last_error_code.trim()}`);
   }
+  appendStructuredErrors(parts, tx.errors);
+
   if (parts.length === 0) return undefined;
   return parts.join(' — ');
 }
@@ -1554,15 +1609,17 @@ async function startServer() {
         // Still pending / processing / unknown non-final state -> keep pending (never unlock, never force failed)
         await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'pending', resolvedTxId);
         const failureHint = extractFedaPayFailureReason(tx);
+        const pendingModeLabel = tx.mode || tx.payment_method;
+        const pendingModeSuffix = pendingModeLabel ? ` [mode: ${pendingModeLabel}]` : '';
         res.json({
           ok: false,
           verified: false,
           status: 'pending',
           providerStatus: txStatus || 'pending',
           transactionId: resolvedTxId,
-          error:
-            failureHint ||
-            'Transaction toujours en attente côté FedaPay (0 FCFA validé). Si la page Sandbox a affiché « Transaction échouée », réessayez avec un numéro de test Sandbox valide (ex. 66000001 MTN / 64000001 Moov).'
+          error: failureHint
+            ? `En attente côté FedaPay${pendingModeSuffix} : ${failureHint}`
+            : 'Transaction toujours en attente côté FedaPay (0 FCFA validé). Si la page Sandbox a affiché « Transaction échouée », réessayez avec un numéro de test Sandbox valide (ex. 66000001 MTN / 64000001 Moov).'
         });
         return;
       }

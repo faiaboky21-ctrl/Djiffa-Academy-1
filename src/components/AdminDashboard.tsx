@@ -1571,7 +1571,7 @@ export const AdminDashboard: React.FC = () => {
                     Passerelles de Paiement & Webhooks (Côté Serveur)
                   </h2>
                   <p className="text-xs text-zinc-400 mt-1">
-                    MTN Mobile Money, Moov Money, Visa et Mastercard via FedaPay, KKiaPay ou CinetPay. Les clés secrètes restent strictement sur le serveur.
+                    Mobile Money et cartes bancaires via FedaPay (selon les moyens activés et vérifiés sur le compte). Les clés secrètes restent strictement sur le serveur.
                   </p>
                 </div>
                 <button
@@ -1638,7 +1638,7 @@ export const AdminDashboard: React.FC = () => {
                   </button>
                 </div>
                 <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  Variables serveur requises sur Render : <code className="text-zinc-200">PAYMENT_PROVIDER</code>, <code className="text-zinc-200">PAYMENT_MODE</code> (<code className="text-zinc-200">sandbox</code> ou <code className="text-zinc-200">live</code>) et les clés du prestataire (<code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code> ou équivalent KKiaPay/CinetPay).
+                  Variables serveur requises sur Render : <code className="text-zinc-200">PAYMENT_PROVIDER</code>, <code className="text-zinc-200">PAYMENT_MODE</code> (<code className="text-zinc-200">sandbox</code> ou <code className="text-zinc-200">live</code>) et les clés FedaPay (<code className="text-zinc-200">FEDAPAY_PUBLIC_KEY</code>, <code className="text-zinc-200">FEDAPAY_SECRET_KEY</code>, <code className="text-zinc-200">FEDAPAY_WEBHOOK_SECRET</code>).
                 </p>
               </div>
             </div>

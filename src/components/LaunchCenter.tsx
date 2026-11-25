@@ -690,11 +690,11 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
         ? activePaymentProbe.message
         : !audit
         ? auditAuthBlocked
-          ? 'Session Direction expirée : reconnectez-vous pour contrôler les clés de paiement côté serveur.'
-          : 'Vérification des passerelles de paiement en attente...'
+          ? 'Session Direction expirée : reconnectez-vous pour contrôler les clés FedaPay côté serveur.'
+          : 'Vérification de la passerelle FedaPay en attente...'
         : audit.payments.activeConfigured
         ? `Clés ${activeProviderKey.toUpperCase()} détectées (${audit.payments.mode}). Lancez un test API pour confirmer.`
-        : 'Clés FedaPay / KKiaPay / CinetPay manquantes. L’application reste en mode démonstration sécurisé.',
+        : 'Clés FedaPay manquantes. L’application reste en mode démonstration sécurisé.',
       status: paymentStatus,
       actionLabel: auditAuthBlocked ? 'Se reconnecter' : `Tester ${activeProviderKey.toUpperCase()}`,
       onAction: auditAuthBlocked ? handleRenewAdminAuth : () => handleVerifyPayment(activeProviderKey)
@@ -1404,7 +1404,7 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
                 </div>
                 <div>
                   <h3 className="font-brand text-lg font-bold text-slate-100">
-                    4. Paiements (FedaPay, KKiaPay & CinetPay)
+                    4. Paiements (FedaPay)
                   </h3>
                   <p className="text-[11px] text-zinc-400">
                     Passerelle active : <strong className="text-white uppercase">{activeProviderKey}</strong> · Mode{' '}
@@ -1415,27 +1415,15 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
               <StatusBadge status={paymentStatus} />
             </div>
 
-            {/* 3 providers matrix */}
+            {/* FedaPay provider status & probe */}
             <div className="space-y-2.5">
               {(
                 [
                   {
                     id: 'fedapay' as const,
-                    label: 'FedaPay (Recommandé Bénin & UEMOA)',
-                    desc: 'MTN MoMo, Moov Money, Visa/Mastercard · sans abonnement mensuel',
+                    label: 'FedaPay (Passerelle officielle Bénin & UEMOA)',
+                    desc: 'Mobile Money & Visa/Mastercard selon les moyens activés · sans abonnement mensuel',
                     configured: audit?.payments.providers.fedapay.configured
-                  },
-                  {
-                    id: 'kkiapay' as const,
-                    label: 'KKiaPay',
-                    desc: 'Mobile Money Bénin & Cartes bancaires',
-                    configured: audit?.payments.providers.kkiapay.configured
-                  },
-                  {
-                    id: 'cinetpay' as const,
-                    label: 'CinetPay',
-                    desc: 'Afrique de l’Ouest & Centrale (Wave, Orange, MTN, Moov)',
-                    configured: audit?.payments.providers.cinetpay.configured
                   }
                 ] as const
               ).map((prov) => {

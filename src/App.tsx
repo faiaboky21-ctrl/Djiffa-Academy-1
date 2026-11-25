@@ -37,6 +37,8 @@ const MainAppContent: React.FC = () => {
     testimonials,
     siteSettings,
     formatPrice,
+    isEnrolled,
+    getCourseProgress,
     paymentReturnNotice,
     dismissPaymentReturnNotice
   } = useApp();
@@ -47,6 +49,8 @@ const MainAppContent: React.FC = () => {
   const featuredCourses = courses.filter((c) => c.isFeatured && c.isPublished);
   const flagshipCourse = courses.find((c) => c.id === 'course-faith-ariola-methode') || courses[0];
   const flagshipPricing = flagshipCourse ? getCoursePricing(flagshipCourse) : null;
+  const flagshipEnrolled = flagshipCourse ? isEnrolled(flagshipCourse.id) : false;
+  const flagshipProgress = flagshipCourse ? getCourseProgress(flagshipCourse.id) : { percentage: 0 };
 
   if (activeView === 'player' && selectedCourseId) {
     return (
@@ -130,9 +134,17 @@ const MainAppContent: React.FC = () => {
 
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center relative z-10">
                       <div className="lg:col-span-7 space-y-4">
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-[#D4AF37]/40 text-xs text-[#F3E5AB]">
-                          <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
-                          <span>Programme Phare Officiel</span>
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-[#D4AF37]/40 text-xs text-[#F3E5AB]">
+                            <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
+                            <span>Programme Phare Officiel</span>
+                          </div>
+                          {flagshipEnrolled && (
+                            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/90 border border-emerald-600/50 text-xs font-medium text-emerald-300">
+                              <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Inscrit ({flagshipProgress.percentage}%)</span>
+                            </div>
+                          )}
                         </div>
 
                         <h2 className="font-brand text-2xl sm:text-3xl lg:text-4xl font-extrabold text-slate-100 leading-tight">
@@ -163,20 +175,32 @@ const MainAppContent: React.FC = () => {
                         </div>
 
                         <div className="pt-4 flex flex-wrap items-center gap-4">
-                          <button
-                            onClick={() => setCheckoutCourse(flagshipCourse)}
-                            className="px-6 py-3.5 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-extrabold text-xs uppercase tracking-wider transition-all shadow-lg flex items-center gap-2 cursor-pointer"
-                          >
-                            <span>
-                              Acheter · {flagshipPricing ? formatPrice(flagshipPricing.activeXOF) : ''}
-                            </span>
-                            <ArrowRight className="w-4 h-4" />
-                          </button>
+                          {flagshipEnrolled ? (
+                            <button
+                              onClick={() => navigateTo('player', flagshipCourse.id)}
+                              className="px-6 py-3.5 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-zinc-950 font-extrabold text-xs uppercase tracking-wider transition-all shadow-lg flex items-center gap-2 cursor-pointer"
+                            >
+                              <span>Accéder à la formation</span>
+                              <ArrowRight className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => setCheckoutCourse(flagshipCourse)}
+                                className="px-6 py-3.5 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-extrabold text-xs uppercase tracking-wider transition-all shadow-lg flex items-center gap-2 cursor-pointer"
+                              >
+                                <span>
+                                  Acheter · {flagshipPricing ? formatPrice(flagshipPricing.activeXOF) : ''}
+                                </span>
+                                <ArrowRight className="w-4 h-4" />
+                              </button>
 
-                          {flagshipPricing?.isPromo && flagshipPricing.crossedOutXOF && (
-                            <span className="text-xs text-zinc-400 line-through tabular-nums">
-                              {formatPrice(flagshipPricing.crossedOutXOF)}
-                            </span>
+                              {flagshipPricing?.isPromo && flagshipPricing.crossedOutXOF && (
+                                <span className="text-xs text-zinc-400 line-through tabular-nums">
+                                  {formatPrice(flagshipPricing.crossedOutXOF)}
+                                </span>
+                              )}
+                            </>
                           )}
 
                           <button
@@ -342,7 +366,7 @@ const MainAppContent: React.FC = () => {
 
                 <div className="pt-4 border-t border-zinc-800 text-xs sm:text-sm text-zinc-300 leading-relaxed whitespace-pre-line">
                   {activeView === 'legal-cgv'
-                    ? siteSettings.termsOfSale
+                    ? siteSettings.termsOfSale.replace(/\s*(?:\/|,|ou)?\s*(?:KKiaPay|CinetPay)/gi, '')
                     : siteSettings.legalNotices}
                 </div>
 

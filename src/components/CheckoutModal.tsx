@@ -588,9 +588,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
 
             {/* Payment Method Selector */}
             <div className="space-y-3">
-              <span className="text-xs font-semibold text-slate-200 block">
-                Choisissez votre moyen de paiement
-              </span>
+              <div>
+                <span className="text-xs font-semibold text-slate-200 block">
+                  Choisissez votre moyen de paiement
+                </span>
+                <span className="text-[11px] text-zinc-400 block mt-0.5">
+                  Passerelle configurée : FedaPay · La disponibilité effective (Mobile Money ou carte Visa/Mastercard) dépend des moyens activés et vérifiés sur le compte.
+                </span>
+              </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <button

@@ -29,7 +29,7 @@ interface CourseDetailPageProps {
 }
 
 export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, onOpenCheckout }) => {
-  const { courses, navigateTo, formatPrice, isEnrolled, getCourseProgress, siteSettings } = useApp();
+  const { courses, navigateTo, formatPrice, isEnrolled, getCourseProgress, siteSettings, paymentConfig } = useApp();
   const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>({
     'mod-1': true,
     'mod-2': true
@@ -329,17 +329,19 @@ export const CourseDetailPage: React.FC<CourseDetailPageProps> = ({ courseId, on
                 </div>
                 <div className="flex items-center gap-2.5">
                   <ShieldCheck className="w-4 h-4 text-[#D4AF37]" />
-                  <span>Paiement 100% sécurisé (Mobile Money & Cartes)</span>
+                  <span>
+                    Paiement sécurisé via FedaPay{paymentConfig.isTestMode ? ' (Sandbox)' : ''}
+                  </span>
                 </div>
               </div>
 
-              {/* Mobile Money logos preview */}
-              <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-center">
-                <span className="text-[10px] text-zinc-400 font-medium block mb-1.5 uppercase tracking-wider">
-                  Moyens de paiement acceptés :
+              {/* Payment gateway & methods preview */}
+              <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-center space-y-1">
+                <span className="text-[10px] text-zinc-400 font-medium block uppercase tracking-wider">
+                  Passerelle configurée : FedaPay{paymentConfig.isTestMode ? ' · Mode Test' : ''}
                 </span>
-                <span className="text-xs text-slate-200 font-semibold">
-                  MTN MoMo · Moov Money · Visa · Mastercard
+                <span className="text-[11px] text-slate-200 font-medium block leading-relaxed">
+                  Mobile Money & Visa / Mastercard selon les moyens activés et vérifiés sur FedaPay
                 </span>
               </div>
 

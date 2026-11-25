@@ -18,7 +18,28 @@ import {
   BookOpen,
   Bell
 } from 'lucide-react';
-import { Currency } from '../types';
+import { Currency, User } from '../types';
+
+function getSafeHeaderDisplayName(user: User): string {
+  const rawName = (user.name || '').trim();
+  const emailLocal = (user.email || '').split('@')[0]?.trim().toLowerCase() || '';
+
+  if (!rawName) {
+    return user.role === 'admin' ? 'Direction' : 'Mon compte';
+  }
+
+  const looksLikeRawEmailOrTechnicalHandle =
+    rawName.includes('@') ||
+    (emailLocal.length > 0 &&
+      rawName.toLowerCase() === emailLocal &&
+      (/\d/.test(rawName) || !/\s/.test(rawName)));
+
+  if (looksLikeRawEmailOrTechnicalHandle) {
+    return user.role === 'admin' ? 'Direction' : 'Mon compte';
+  }
+
+  return rawName;
+}
 
 export const Navbar: React.FC = () => {
   const {
@@ -51,6 +72,7 @@ export const Navbar: React.FC = () => {
   const unreadCount = currentUser
     ? notifications.filter((n) => !n.read && (n.userId === 'all' || n.userId === currentUser.id)).length
     : 0;
+  const headerDisplayName = currentUser ? getSafeHeaderDisplayName(currentUser) : '';
 
   const handleNavClick = (view: Parameters<typeof navigateTo>[0], courseId?: string) => {
     navigateTo(view, courseId);
@@ -164,17 +186,18 @@ export const Navbar: React.FC = () => {
                 className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-zinc-900 border border-[#D4AF37]/30 hover:border-[#D4AF37] transition-all cursor-pointer text-left"
               >
                 <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#D4AF37] to-[#8C701E] flex items-center justify-center text-zinc-950 font-bold text-xs relative">
-                  {currentUser.name.charAt(0)}
+                  {(headerDisplayName.charAt(0) || 'D').toUpperCase()}
                   {unreadCount > 0 && (
                     <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[9px] flex items-center justify-center font-bold">
                       {unreadCount}
                     </span>
                   )}
                 </div>
-                <div className="hidden sm:flex flex-col text-left">
-                  <span className="text-xs font-semibold text-slate-100 max-w-[120px] truncate">
-                    {currentUser.name}
+                <div className="hidden sm:flex flex-col text-left gap-0.5 leading-tight">
+                  <span className="text-xs font-semibold text-slate-100 max-w-[130px] truncate">
+                    {headerDisplayName}
                   </span>
+                  <span className="sr-only"> · </span>
                   <span className="text-[10px] text-zinc-400">
                     {currentUser.role === 'admin' ? 'Directrice' : 'Apprenant'}
                   </span>
@@ -193,7 +216,7 @@ export const Navbar: React.FC = () => {
             {userDropdownOpen && currentUser && (
               <div className="absolute right-0 mt-2 w-64 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl py-2 z-50">
                 <div className="px-4 py-2.5 border-b border-zinc-800/80">
-                  <p className="text-xs font-semibold text-slate-100">{currentUser.name}</p>
+                  <p className="text-xs font-semibold text-slate-100">{headerDisplayName}</p>
                   <p className="text-[11px] text-zinc-400 truncate">{currentUser.email}</p>
                   <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-[#D4AF37]/10 text-[#F3E5AB] border border-[#D4AF37]/20">
                     {currentUser.role === 'admin' ? (

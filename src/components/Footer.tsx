@@ -9,7 +9,7 @@ import { ShieldCheck, ExternalLink } from 'lucide-react';
 import { safeExternalUrl } from '../lib/media';
 
 export const Footer: React.FC = () => {
-  const { navigateTo, openAuthModal, siteSettings, language, setLanguage } = useApp();
+  const { navigateTo, openAuthModal, siteSettings, language, setLanguage, paymentConfig } = useApp();
 
   return (
     <footer className="bg-zinc-950 border-t border-zinc-800/80 text-zinc-400 text-xs pt-16 pb-12">
@@ -207,18 +207,22 @@ export const Footer: React.FC = () => {
               Paiements & Langue
             </span>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              Paiement individuel direct par Mobile Money au Bénin et en Afrique, et par carte bancaire internationale.
+              Paiement individuel via la passerelle FedaPay, selon les moyens activés et vérifiés sur le compte marchand.
             </p>
 
             <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1.5">
               <span className="text-[10px] text-zinc-500 uppercase tracking-wider block font-semibold">
-                Moyens acceptés :
+                Passerelle configurée : FedaPay
               </span>
               <div className="text-xs font-semibold text-slate-200">
-                MTN Mobile Money · Moov Money · Visa · Mastercard
+                Mobile Money (MTN / Moov) & Visa / Mastercard
               </div>
               <span className="text-[10px] text-zinc-500 block">
-                Compatible FedaPay / KKiaPay / CinetPay
+                {paymentConfig.serverConfigured
+                  ? paymentConfig.isTestMode
+                    ? 'Environnement Sandbox / Test actif · Moyens affichés selon activation FedaPay'
+                    : 'Moyens proposés selon activation vérifiée sur FedaPay'
+                  : 'Moyens disponibles selon l’activation sur le compte FedaPay'}
               </span>
             </div>
 

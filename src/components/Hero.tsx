@@ -153,13 +153,13 @@ export const Hero: React.FC = () => {
 
           <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800/60">
             <span className="font-brand text-2xl sm:text-3xl font-extrabold text-[#D4AF37] tabular-nums block">
-              Mobile Money
+              FedaPay
             </span>
             <span className="text-xs text-zinc-300 font-medium mt-1 block">
-              Paiement Local & Mondial
+              Passerelle Configurée
             </span>
             <span className="text-[11px] text-zinc-500 block">
-              MTN, Moov & Cartes Visa/Mastercard
+              Mobile Money & cartes selon activation
             </span>
           </div>
 

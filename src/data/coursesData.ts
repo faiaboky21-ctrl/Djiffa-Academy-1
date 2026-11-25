@@ -592,7 +592,7 @@ export const COACHING_PROGRAMS: CoachingProgramConfig[] = [
 export const FAQ_ITEMS = [
   {
     question: 'Comment se passe l’accès aux formations après l’achat ?',
-    answer: 'Dès confirmation de votre paiement (par MTN Mobile Money, Moov Money ou carte bancaire), votre accès est débloqué automatiquement et immédiatement. Vous retrouvez votre formation dans votre espace personnel, accessible 24h/24, 7j/7, sur smartphone, tablette et ordinateur.'
+    answer: 'Dès confirmation réelle de votre paiement via FedaPay (selon les moyens activés : Mobile Money ou carte bancaire), votre accès est débloqué automatiquement et immédiatement. Vous retrouvez votre formation dans votre espace personnel, accessible 24h/24, 7j/7, sur smartphone, tablette et ordinateur.'
   },
   {
     question: 'Ai-je besoin d’un ordinateur surpuissant pour suivre les formations ?',
@@ -600,7 +600,7 @@ export const FAQ_ITEMS = [
   },
   {
     question: 'Quels sont les moyens de paiement acceptés pour le Bénin et l’international ?',
-    answer: 'Au Bénin et en Afrique de l’Ouest/Centrale, nous acceptons MTN Mobile Money, Moov Money, Orange Money et Wave via nos passerelles sécurisées (FedaPay, KKiaPay, CinetPay). Pour nos apprenants en Europe, aux États-Unis et dans le reste du monde, les cartes bancaires internationales Visa et Mastercard sont acceptées sans frais cachés.'
+    answer: 'Les paiements sont traités via notre passerelle configurée FedaPay. Selon les moyens effectivement activés et vérifiés sur le compte FedaPay (notamment Mobile Money au Bénin/UEMOA et, le cas échéant, cartes Visa et Mastercard), les options disponibles s’affichent directement au moment du règlement sécurisé.'
   },
   {
     question: 'Les formations donnent-elles droit à un certificat ?',
@@ -718,6 +718,6 @@ export const INITIAL_SITE_SETTINGS: SiteSettings = {
   legalNotices:
     'Éditeur du site : DJIFFA ACADEMY, pôle formation de DJIFFA DESIGN AGENCY.\nDirectrice de publication : Faith Ariola.\nSiège social : Cotonou, République du Bénin.\nContact officiel : universdjiffaariola@gmail.com.\nPropriété intellectuelle : L’ensemble des formations, vidéos, prompts, supports PDF et visuels publiés sur DJIFFA ACADEMY sont protégés par les lois relatives à la propriété intellectuelle. Toute reproduction ou diffusion non autorisée est strictement interdite.',
   termsOfSale:
-    '1. Objet : Les présentes Conditions Générales de Vente régissent l’achat individuel des formations certifiantes et programmes d’accompagnement sur DJIFFA ACADEMY.\n2. Tarifs & Monnaies : Les prix sont exprimés principalement en FCFA (XOF), avec équivalents indicatifs en EUR et USD. Aucun abonnement mensuel automatique n’est appliqué.\n3. Paiement & Activation : Les paiements sont traités via nos prestataires sécurisés (MTN Mobile Money, Moov Money, Visa, Mastercard via FedaPay / KKiaPay / CinetPay). L’accès aux contenus numériques est activé uniquement après confirmation réelle de la transaction par le prestataire.\n4. Accès personnel : L’accès est strictement personnel et nominatif.\n5. Assistance : Toute réclamation ou demande d’accompagnement s’effectue via l’adresse email officielle de la Direction.'
+    '1. Objet : Les présentes Conditions Générales de Vente régissent l’achat individuel des formations certifiantes et programmes d’accompagnement sur DJIFFA ACADEMY.\n2. Tarifs & Monnaies : Les prix sont exprimés principalement en FCFA (XOF), avec équivalents indicatifs en EUR et USD. Aucun abonnement mensuel automatique n’est appliqué.\n3. Paiement & Activation : Les paiements sont traités via notre passerelle configurée FedaPay (selon les moyens activés et vérifiés sur le compte marchand : Mobile Money et/ou cartes Visa/Mastercard). L’accès aux contenus numériques est activé uniquement après confirmation réelle de la transaction par le prestataire.\n4. Accès personnel : L’accès est strictement personnel et nominatif.\n5. Assistance : Toute réclamation ou demande d’accompagnement s’effectue via l’adresse email officielle de la Direction.'
 };
 

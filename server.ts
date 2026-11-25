@@ -427,15 +427,110 @@ async function revokeOrderEnrollmentInSupabase(
   return { found: true, alreadyInState };
 }
 
+const FEDAPAY_COUNTRY_BY_DIAL: Array<{ dial: string; country: string }> = [
+  { dial: '229', country: 'bj' },
+  { dial: '225', country: 'ci' },
+  { dial: '228', country: 'tg' },
+  { dial: '221', country: 'sn' },
+  { dial: '226', country: 'bf' },
+  { dial: '223', country: 'ml' },
+  { dial: '227', country: 'ne' },
+  { dial: '224', country: 'gn' },
+  { dial: '233', country: 'gh' },
+  { dial: '234', country: 'ng' },
+  { dial: '33', country: 'fr' }
+];
+
+function normalizeFedaPayPhoneNumber(rawPhone?: string | null): { number: string; country: string } | undefined {
+  const input = String(rawPhone || '').trim();
+  if (!input) return undefined;
+
+  let compact = input.replace(/[\s().-]+/g, '');
+  if (compact.startsWith('00')) {
+    compact = `+${compact.slice(2)}`;
+  }
+
+  const hasPlus = compact.startsWith('+');
+  const digitsOnly = compact.replace(/\D/g, '');
+  if (digitsOnly.length < 8) return undefined;
+
+  if (hasPlus) {
+    const matched = FEDAPAY_COUNTRY_BY_DIAL.find((entry) => digitsOnly.startsWith(entry.dial));
+    if (matched) {
+      const localPart = digitsOnly.slice(matched.dial.length);
+      if (localPart.length >= 8) {
+        return { number: `+${digitsOnly}`, country: matched.country };
+      }
+      return undefined;
+    }
+    return { number: `+${digitsOnly}`, country: 'bj' };
+  }
+
+  // Handle Benin numbers entered without '+' (229XXXXXXXX, 22901XXXXXXXX, 01XXXXXXXX, XXXXXXXX)
+  if (digitsOnly.startsWith('229')) {
+    const localPart = digitsOnly.slice(3);
+    if (localPart.length === 8 || (localPart.length === 10 && localPart.startsWith('01'))) {
+      return { number: `+229${localPart}`, country: 'bj' };
+    }
+  }
+
+  if (digitsOnly.length === 10 && digitsOnly.startsWith('01')) {
+    return { number: `+229${digitsOnly}`, country: 'bj' };
+  }
+
+  if (digitsOnly.length === 8) {
+    return { number: `+229${digitsOnly}`, country: 'bj' };
+  }
+
+  const matched = FEDAPAY_COUNTRY_BY_DIAL.find((entry) => digitsOnly.startsWith(entry.dial));
+  if (matched && digitsOnly.length > matched.dial.length + 7) {
+    return { number: `+${digitsOnly}`, country: matched.country };
+  }
+
+  return undefined;
+}
+
+function extractFedaPayApiError(rawBody: string, fallback: string): string {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      message?: string;
+      errors?: Record<string, string[] | string | Record<string, unknown>>;
+    };
+    const parts: string[] = [];
+    if (typeof parsed.message === 'string' && parsed.message.trim()) {
+      parts.push(parsed.message.trim());
+    }
+    if (parsed.errors && typeof parsed.errors === 'object') {
+      for (const [field, val] of Object.entries(parsed.errors)) {
+        const msg = Array.isArray(val)
+          ? val.join(', ')
+          : val && typeof val === 'object'
+          ? JSON.stringify(val)
+          : String(val || '');
+        if (msg.trim()) parts.push(`${field}: ${msg.trim()}`);
+      }
+    }
+    return parts.length > 0 ? parts.join(' — ') : fallback;
+  } catch {
+    return trimmed.slice(0, 220) || fallback;
+  }
+}
+
 interface FedaPayTransactionPayload {
   id?: number | string;
   reference?: string;
   status?: string;
+  mode?: string;
+  payment_method?: string;
   amount?: number | string;
   currency?: { iso?: string };
   custom_metadata?: { reference?: string };
-  last_error?: { message?: string } | string;
+  last_error?: { message?: string; code?: string } | string;
+  last_error_code?: string;
   status_reason?: string;
+  reason?: string;
 }
 
 type FedaPayFetchResult =
@@ -452,13 +547,8 @@ async function fetchFedaPayTransaction(transactionId: string, mode: 'sandbox' | 
       }
     });
     if (!response.ok) {
-      let errMsg = `Réponse API FedaPay HTTP ${response.status}`;
-      try {
-        const errJson = (await response.json()) as { message?: string };
-        if (errJson?.message) errMsg = errJson.message;
-      } catch {
-        // ignore non-JSON body
-      }
+      const rawErr = await response.text().catch(() => '');
+      const errMsg = extractFedaPayApiError(rawErr, `Réponse API FedaPay HTTP ${response.status}`);
       return {
         ok: false,
         temporary: response.status >= 500 || response.status === 429 || response.status === 408,
@@ -481,12 +571,26 @@ async function fetchFedaPayTransaction(transactionId: string, mode: 'sandbox' | 
 }
 
 function extractFedaPayFailureReason(tx: FedaPayTransactionPayload): string | undefined {
-  if (typeof tx.status_reason === 'string' && tx.status_reason.trim()) return tx.status_reason.trim();
-  if (typeof tx.last_error === 'string' && tx.last_error.trim()) return tx.last_error.trim();
-  if (tx.last_error && typeof tx.last_error === 'object' && typeof tx.last_error.message === 'string' && tx.last_error.message.trim()) {
-    return tx.last_error.message.trim();
+  const parts: string[] = [];
+  if (typeof tx.status_reason === 'string' && tx.status_reason.trim()) parts.push(tx.status_reason.trim());
+  if (typeof tx.reason === 'string' && tx.reason.trim() && !parts.includes(tx.reason.trim())) {
+    parts.push(tx.reason.trim());
   }
-  return undefined;
+  if (typeof tx.last_error === 'string' && tx.last_error.trim()) {
+    parts.push(tx.last_error.trim());
+  } else if (tx.last_error && typeof tx.last_error === 'object') {
+    if (typeof tx.last_error.message === 'string' && tx.last_error.message.trim()) {
+      parts.push(tx.last_error.message.trim());
+    }
+    if (typeof tx.last_error.code === 'string' && tx.last_error.code.trim()) {
+      parts.push(`code: ${tx.last_error.code.trim()}`);
+    }
+  }
+  if (typeof tx.last_error_code === 'string' && tx.last_error_code.trim()) {
+    parts.push(`code: ${tx.last_error_code.trim()}`);
+  }
+  if (parts.length === 0) return undefined;
+  return parts.join(' — ');
 }
 
 function sanitizeStorageObjectPath(rawPath: string): string | null {
@@ -990,11 +1094,27 @@ async function startServer() {
 
       if (status.provider === 'fedapay') {
         const baseUrl = status.mode === 'live' ? 'https://api.fedapay.com/v1' : 'https://sandbox-api.fedapay.com/v1';
+        const normalizedPhone = normalizeFedaPayPhoneNumber(customerPhone);
+        const customerPayload: {
+          firstname: string;
+          lastname: string;
+          email: string;
+          phone_number?: { number: string; country: string };
+        } = {
+          firstname: String(customerName || 'Apprenant').split(' ')[0],
+          lastname: String(customerName || 'DJIFFA').split(' ').slice(1).join(' ') || 'Academy',
+          email: customerEmail
+        };
+        if (normalizedPhone) {
+          customerPayload.phone_number = normalizedPhone;
+        }
+
         const response = await fetch(`${baseUrl}/transactions`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
           },
           body: JSON.stringify({
             description: description || `Formation DJIFFA ACADEMY - ${reference}`,
@@ -1002,24 +1122,27 @@ async function startServer() {
             currency: { iso: normalizedCurrency },
             callback_url: `${appUrl}/?payment_ref=${encodeURIComponent(reference)}`,
             custom_metadata: { reference, paymentMethod, courseId },
-            customer: {
-              firstname: String(customerName || 'Apprenant').split(' ')[0],
-              lastname: String(customerName || 'DJIFFA').split(' ').slice(1).join(' ') || 'Academy',
-              email: customerEmail,
-              phone_number: customerPhone ? { number: customerPhone, country: 'bj' } : undefined
-            }
+            customer: customerPayload
           })
         });
 
-        const data = (await response.json()) as {
-          'v1/transaction'?: { id?: number; reference?: string; payment_url?: string };
-          message?: string;
-        };
+        const rawTxBody = await response.text().catch(() => '');
         if (!response.ok) {
-          res.status(502).json({ ok: false, error: data.message || 'Erreur API FedaPay.' });
+          const errMsg = extractFedaPayApiError(rawTxBody, `Erreur API FedaPay (HTTP ${response.status}).`);
+          recordPaymentEvent({
+            reference: String(reference),
+            provider: 'fedapay',
+            event: 'create_session_error',
+            status: 'failed',
+            detail: errMsg
+          });
+          res.status(502).json({ ok: false, error: errMsg });
           return;
         }
 
+        const data = (rawTxBody ? JSON.parse(rawTxBody) : {}) as {
+          'v1/transaction'?: { id?: number; reference?: string; payment_url?: string };
+        };
         const tx = data['v1/transaction'];
         const fedaTxId = tx?.id !== undefined && tx?.id !== null ? String(tx.id) : null;
         let paymentUrl = tx?.payment_url || null;
@@ -1028,7 +1151,10 @@ async function startServer() {
         if (supabaseAdmin && fedaTxId) {
           await supabaseAdmin
             .from('orders')
-            .update({ provider_transaction_id: fedaTxId })
+            .update({
+              provider_transaction_id: fedaTxId,
+              ...(normalizedPhone ? { customer_phone: normalizedPhone.number } : {})
+            })
             .eq('reference', String(reference));
         }
 
@@ -1038,13 +1164,41 @@ async function startServer() {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${process.env.FEDAPAY_SECRET_KEY}`,
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
             }
           });
-          if (tokenRes.ok) {
-            const tokenData = (await tokenRes.json()) as { url?: string; token?: string };
-            paymentUrl = tokenData.url || null;
+          const rawTokenBody = await tokenRes.text().catch(() => '');
+          if (!tokenRes.ok) {
+            const tokenErr = extractFedaPayApiError(
+              rawTokenBody,
+              `Impossible d’obtenir l’URL de paiement FedaPay (HTTP ${tokenRes.status}).`
+            );
+            recordPaymentEvent({
+              reference: String(reference),
+              provider: 'fedapay',
+              event: 'create_session_error',
+              status: 'failed',
+              detail: `Token FedaPay Tx ${fedaTxId} : ${tokenErr}`
+            });
+            res.status(502).json({ ok: false, error: tokenErr });
+            return;
           }
+          const tokenData = (rawTokenBody ? JSON.parse(rawTokenBody) : {}) as { url?: string; token?: string };
+          paymentUrl = tokenData.url || null;
+        }
+
+        if (!paymentUrl) {
+          const missingUrlMsg = 'FedaPay n’a pas renvoyé d’URL de paiement hébergée.';
+          recordPaymentEvent({
+            reference: String(reference),
+            provider: 'fedapay',
+            event: 'create_session_error',
+            status: 'failed',
+            detail: missingUrlMsg
+          });
+          res.status(502).json({ ok: false, error: missingUrlMsg });
+          return;
         }
 
         recordPaymentEvent({
@@ -1052,7 +1206,9 @@ async function startServer() {
           provider: 'fedapay',
           event: 'create_session',
           status: 'pending',
-          detail: `Session créée (${normalizedCurrency} ${verifiedAmount}${fedaTxId ? `, Tx ${fedaTxId}` : ''})`
+          detail: `Session créée (${normalizedCurrency} ${verifiedAmount}${fedaTxId ? `, Tx ${fedaTxId}` : ''}${
+            normalizedPhone ? `, ${normalizedPhone.number}` : ''
+          })`
         });
 
         res.json({
@@ -1266,6 +1422,27 @@ async function startServer() {
             return;
           }
 
+          const enrollRes = await activateOrderEnrollmentInSupabase(cleanRef, resolvedTxId);
+          if (enrollRes && enrollRes.ok === false && !enrollRes.skipped) {
+            recordPaymentEvent({
+              reference: cleanRef,
+              provider: 'fedapay',
+              event: 'enrollment_error',
+              status: 'pending',
+              detail: `Transaction ${resolvedTxId} approuvée, mais activation Supabase échouée : ${enrollRes.error}`
+            });
+            res.status(500).json({
+              ok: false,
+              verified: false,
+              temporaryError: true,
+              status: storedOrderStatus || 'pending',
+              providerStatus: txStatus,
+              transactionId: resolvedTxId,
+              error: `Paiement vérifié auprès de FedaPay, mais l’activation de la commande/inscription dans Supabase a échoué (${enrollRes.error}).`
+            });
+            return;
+          }
+
           processedTransactions.set(cleanRef, {
             status: 'confirmed',
             verifiedAt: new Date().toISOString(),
@@ -1278,7 +1455,6 @@ async function startServer() {
             status: 'confirmed',
             detail: `Transaction ${resolvedTxId} vérifiée (${txStatus})`
           });
-          await activateOrderEnrollmentInSupabase(cleanRef, resolvedTxId);
           res.json({
             ok: true,
             verified: true,
@@ -1291,6 +1467,8 @@ async function startServer() {
 
         if (txStatus === 'declined' || txStatus === 'failed') {
           const failureReason = extractFedaPayFailureReason(tx);
+          const txModeLabel = tx.mode || tx.payment_method;
+          const modeSuffix = txModeLabel ? ` [mode: ${txModeLabel}]` : '';
           await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'failed', resolvedTxId);
           processedTransactions.set(cleanRef, {
             status: 'failed',
@@ -1302,7 +1480,7 @@ async function startServer() {
             provider: 'fedapay',
             event: 'verify',
             status: 'failed',
-            detail: `Transaction ${resolvedTxId} refusée (${txStatus}${failureReason ? ` : ${failureReason}` : ''})`
+            detail: `Transaction ${resolvedTxId} refusée (${txStatus}${modeSuffix}${failureReason ? ` : ${failureReason}` : ''})`
           });
           res.json({
             ok: false,
@@ -1312,8 +1490,8 @@ async function startServer() {
             providerStatus: txStatus,
             transactionId: resolvedTxId,
             error: failureReason
-              ? `Transaction refusée par FedaPay : ${failureReason}`
-              : 'Transaction refusée par FedaPay (declined).'
+              ? `Transaction refusée par FedaPay${modeSuffix} : ${failureReason}`
+              : `Transaction refusée par FedaPay (${txStatus}${modeSuffix}).`
           });
           return;
         }
@@ -1841,6 +2019,23 @@ async function startServer() {
         }
       }
 
+      const enrollRes = await activateOrderEnrollmentInSupabase(cleanRef, verifiedTxId);
+      if (enrollRes && enrollRes.ok === false && !enrollRes.skipped) {
+        recordPaymentEvent({
+          reference: cleanRef,
+          provider: status.provider,
+          event: 'webhook_enrollment_error',
+          status: 'pending',
+          detail: `Webhook vérifié, mais échec activation Supabase : ${enrollRes.error}`
+        });
+        res.status(503).json({
+          ok: false,
+          temporaryError: true,
+          error: `Échec temporaire d’activation de la commande/inscription dans Supabase : ${enrollRes.error}`
+        });
+        return;
+      }
+
       processedTransactions.set(cleanRef, {
         status: 'confirmed',
         verifiedAt: new Date().toISOString(),
@@ -1853,7 +2048,6 @@ async function startServer() {
         status: 'confirmed',
         detail: `Webhook confirmé${verifiedTxId ? ` (Tx ${verifiedTxId})` : ''}`
       });
-      await activateOrderEnrollmentInSupabase(cleanRef, verifiedTxId);
       rememberWebhookEvent(webhookKey);
       res.json({ ok: true, received: true, status: 'confirmed' });
       return;

@@ -456,7 +456,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                       required
                       value={authPhone}
                       onChange={(e) => setAuthPhone(e.target.value)}
-                      placeholder="+229 97 00 00 00"
+                      placeholder="+229 01 97 00 00 00"
                       className="w-full px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-slate-100 focus:outline-none focus:border-[#D4AF37]"
                     />
                   </div>
@@ -506,6 +506,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                   </p>
                   <span className="font-mono text-[11px] text-zinc-300">Réf : {pendingRef}</span>
                 </div>
+
+                {paymentConfig.isTestMode && paymentConfig.activeProvider === 'fedapay' && (
+                  <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                    Sur la page FedaPay Sandbox, choisissez <strong className="text-white">Test Momo (Momo Test)</strong> (MTN/Moov Bénin y sont regroupés en mode test ; n’utilisez pas Orange/Moov/Wave Côte d’Ivoire pour un numéro Bénin +229).
+                  </p>
+                )}
 
                 {safeExternalUrl(externalPaymentUrl) && (
                   <a
@@ -669,11 +675,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                   required
                   value={phoneNumber}
                   onChange={(e) => setPhoneNumber(e.target.value)}
-                  placeholder="+229 97 00 00 00"
+                  placeholder="+229 01 97 00 00 00"
                   className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 text-xs text-slate-100 focus:outline-none focus:border-[#D4AF37]"
                 />
                 <p className="text-[11px] text-zinc-400">
-                  Vous validerez la transaction directement sur la page sécurisée du prestataire et par confirmation USSD sur votre téléphone.
+                  Format Bénin (+229) : saisissez votre numéro à 10 chiffres (<code className="text-zinc-200">+229 01 XX XX XX XX</code>) ou un numéro de test Sandbox. Vous validerez ensuite la transaction sur la page sécurisée du prestataire.
                 </p>
               </div>
             ) : (
@@ -728,9 +734,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
                   Vous effectuez un test sur l’environnement Sandbox de {paymentConfig.activeProvider.toUpperCase()}. Aucun vrai portefeuille Mobile Money ni aucune vraie carte bancaire ne sera débité.
                 </p>
                 {paymentConfig.activeProvider === 'fedapay' && (
-                  <p className="text-zinc-300">
-                    Numéros de test FedaPay Sandbox (Bénin) : utilisez <strong className="text-[#F3E5AB]">66000001</strong> (MTN MoMo succès) ou <strong className="text-[#F3E5AB]">64000001</strong> (Moov Money succès). Un vrai numéro personnel échoue en Sandbox. Utilisez <strong className="text-[#F3E5AB]">66000000</strong> / <strong className="text-[#F3E5AB]">64000000</strong> pour simuler un refus.
-                  </p>
+                  <div className="space-y-1 text-zinc-300 leading-relaxed">
+                    <p>
+                      <strong className="text-[#F3E5AB]">Mode Test Momo (Momo Test) :</strong> en Sandbox FedaPay, MTN Bénin et Moov Bénin n’apparaissent pas séparément ; sélectionnez <strong className="text-white">Momo Test</strong> sur la page FedaPay (évitez les opérateurs Côte d’Ivoire pour un test Bénin +229).
+                    </p>
+                    <p>
+                      Numéros de test FedaPay Sandbox (Bénin) : <strong className="text-[#F3E5AB]">66000001</strong> / <strong className="text-[#F3E5AB]">0166000001</strong> (MTN succès), <strong className="text-[#F3E5AB]">64000001</strong> / <strong className="text-[#F3E5AB]">0164000001</strong> (Moov succès), <strong className="text-[#F3E5AB]">66000000</strong> / <strong className="text-[#F3E5AB]">64000000</strong> (échec simulé) · Carte test Visa : <strong className="text-[#F3E5AB]">4111111111111111</strong>.
+                    </p>
+                  </div>
                 )}
               </div>
             )}

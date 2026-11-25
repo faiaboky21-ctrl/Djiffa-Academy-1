@@ -1056,6 +1056,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 : o
             )
           );
+          if (isSupabaseConfigured && currentUser && isUuid(currentUser.id)) {
+            await hydrateSupabaseUser(currentUser.id, currentUser.email);
+          }
         }
 
         return {
@@ -1122,13 +1125,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     (async () => {
       const result = await verifyExistingPayment(paymentRef, txId);
-      if (result.verified) {
-        if (isSupabaseConfigured && supabase) {
-          const { data } = await supabase.auth.getSession();
-          if (data.session?.user) {
-            await hydrateSupabaseUser(data.session.user.id, data.session.user.email);
-          }
+      if (isSupabaseConfigured && supabase) {
+        const { data } = await supabase.auth.getSession();
+        if (data.session?.user) {
+          await hydrateSupabaseUser(data.session.user.id, data.session.user.email);
         }
+      }
+      if (result.verified) {
         setPaymentReturnNotice({
           type: 'success',
           message: `Paiement confirmé (${paymentRef}). Votre formation est désormais accessible dans votre Espace Apprenant.`

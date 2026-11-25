@@ -757,9 +757,109 @@ function canonicalizeBrandImageForStorage(rawPath: string | undefined | null): s
   return trimmed;
 }
 
+function generateSecureOrderReference(): string {
+  return `DJF-${new Date().getFullYear()}-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
+}
+
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+
+function createRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  message: string;
+  keyPrefix: string;
+}) {
+  const buckets = new Map<string, RateLimitBucket>();
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    if (buckets.size > 5000) {
+      for (const [k, v] of buckets.entries()) {
+        if (v.resetAt <= now) buckets.delete(k);
+      }
+    }
+    const clientIp = (req.ip || req.socket?.remoteAddress || 'unknown').trim();
+    const key = `${options.keyPrefix}:${clientIp}`;
+    const existing = buckets.get(key);
+    if (!existing || existing.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + options.windowMs });
+      next();
+      return;
+    }
+    existing.count += 1;
+    if (existing.count > options.maxRequests) {
+      const retryAfterSec = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({
+        ok: false,
+        error: options.message,
+        retryAfterSeconds: retryAfterSec
+      });
+      return;
+    }
+    next();
+  };
+}
+
+async function resolveCallerLookupIds(userId: string | null, email: string | null): Promise<Set<string>> {
+  const lookupUserIds = new Set<string>();
+  if (userId && /^[0-9a-f-]{36}$/i.test(userId)) {
+    lookupUserIds.add(userId);
+  }
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (cleanEmail && supabaseAdmin) {
+    const { data: emailProfiles } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .ilike('email', cleanEmail);
+    (emailProfiles || []).forEach((p: { id?: string }) => {
+      if (p.id && /^[0-9a-f-]{36}$/i.test(p.id)) lookupUserIds.add(p.id);
+    });
+  }
+  return lookupUserIds;
+}
+
 async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+
+  // Security headers (applied safely for both production & AI Studio iframe preview)
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    if (isProduction) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    }
+    next();
+  });
+
+  const adminLoginLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    maxRequests: 8,
+    keyPrefix: 'admin-login',
+    message: 'Trop de tentatives de connexion Direction. Veuillez patienter 15 minutes avant de réessayer.'
+  });
+
+  const publicFormLimiter = createRateLimiter({
+    windowMs: 10 * 60 * 1000,
+    maxRequests: 6,
+    keyPrefix: 'public-form',
+    message: 'Trop de requêtes envoyées depuis cette connexion. Veuillez patienter quelques minutes.'
+  });
+
+  const paymentApiLimiter = createRateLimiter({
+    windowMs: 5 * 60 * 1000,
+    maxRequests: 25,
+    keyPrefix: 'payment-api',
+    message: 'Trop de requêtes de paiement en un court instant. Veuillez patienter un moment.'
+  });
 
   // Preserve raw body for webhook HMAC signature verification
   app.use(
@@ -897,7 +997,7 @@ async function startServer() {
   });
 
   // 3b. Public Contact Form Submission (persisted server-side & in Supabase contact_messages when available)
-  app.post('/api/public/contact', async (req, res) => {
+  app.post('/api/public/contact', publicFormLimiter, async (req, res) => {
     const { name, email, phone, subject, message } = req.body || {};
     const cleanName = String(name || '').trim().slice(0, 120);
     const cleanEmail = String(email || '').trim().slice(0, 160);
@@ -944,7 +1044,7 @@ async function startServer() {
   });
 
   // 3c. Public Coaching / Mentorship Request Submission (persists server-side to Supabase when active)
-  app.post('/api/public/coaching-request', async (req, res) => {
+  app.post('/api/public/coaching-request', publicFormLimiter, async (req, res) => {
     const caller = await resolveCallerAuth(req);
     const {
       userId,
@@ -1096,15 +1196,13 @@ async function startServer() {
   });
 
   // 4. Create real payment session (FedaPay / CinetPay / KKiaPay) + record pending order in Supabase if active
-  app.post('/api/payments/create-session', async (req, res) => {
+  app.post('/api/payments/create-session', paymentApiLimiter, async (req, res) => {
     const status = getServerPaymentStatus();
     const {
-      reference,
       amount,
       currency,
       description,
       courseId,
-      userId,
       customerEmail,
       customerName,
       customerPhone,
@@ -1113,7 +1211,7 @@ async function startServer() {
     } = req.body || {};
 
     const numericAmount = Number(amount);
-    if (!reference || !courseId || !Number.isFinite(numericAmount) || numericAmount <= 0 || !currency || !customerEmail) {
+    if (!courseId || !Number.isFinite(numericAmount) || numericAmount <= 0 || !currency) {
       res.status(400).json({ ok: false, error: 'Paramètres de commande incomplets ou montant invalide.' });
       return;
     }
@@ -1139,15 +1237,40 @@ async function startServer() {
       return;
     }
 
+    const caller = await resolveCallerAuth(req);
+    if (supabaseAdmin && (!caller.userId || (!caller.isAdmin && !/^[0-9a-f-]{36}$/i.test(caller.userId)))) {
+      res.status(401).json({
+        ok: false,
+        error: 'Authentification apprenant requise pour initialiser un paiement sécurisé.'
+      });
+      return;
+    }
+
+    const effectiveEmail = (caller.email || String(customerEmail || '')).trim();
+    if (!effectiveEmail) {
+      res.status(400).json({ ok: false, error: 'Adresse email apprenant requise pour la commande.' });
+      return;
+    }
+    if (
+      caller.email &&
+      !caller.isAdmin &&
+      customerEmail &&
+      String(customerEmail).trim().toLowerCase() !== caller.email.trim().toLowerCase()
+    ) {
+      res.status(403).json({
+        ok: false,
+        error: 'L’adresse email de facturation doit correspondre à votre compte connecté.'
+      });
+      return;
+    }
+
     const normalizedCurrency = currency === 'EUR' ? 'EUR' : currency === 'USD' ? 'USD' : 'XOF';
     let verifiedAmount = Math.round(numericAmount);
-    const caller = await resolveCallerAuth(req);
     const resolvedUserId =
       caller.userId && /^[0-9a-f-]{36}$/i.test(caller.userId)
         ? caller.userId
-        : userId && /^[0-9a-f-]{36}$/i.test(String(userId))
-        ? String(userId)
         : null;
+    const reference = generateSecureOrderReference();
 
     // Validate authoritative course price & promo code from Supabase (never silently bypass on DB errors)
     if (supabaseAdmin) {
@@ -1254,8 +1377,8 @@ async function startServer() {
 
       const { data: existingOrder, error: existingOrderErr } = await supabaseAdmin
         .from('orders')
-        .select('id, status')
-        .eq('reference', String(reference))
+        .select('id')
+        .eq('reference', reference)
         .maybeSingle();
 
       if (existingOrderErr) {
@@ -1265,10 +1388,10 @@ async function startServer() {
         });
         return;
       }
-      if (existingOrder?.status === 'confirmed') {
+      if (existingOrder) {
         res.status(409).json({
           ok: false,
-          error: 'Cette référence de commande est déjà confirmée.'
+          error: 'Collision de référence détectée. Veuillez relancer l’initialisation du paiement.'
         });
         return;
       }
@@ -1276,7 +1399,7 @@ async function startServer() {
       const orderFields = {
         user_id: resolvedUserId,
         user_name: String(customerName || 'Apprenant'),
-        user_email: String(customerEmail),
+        user_email: effectiveEmail,
         course_id: String(courseId),
         course_title: String(description || 'Formation DJIFFA ACADEMY'),
         amount: verifiedAmount,
@@ -1290,13 +1413,11 @@ async function startServer() {
         customer_phone: customerPhone ? String(customerPhone) : null
       };
 
-      const { error: orderWriteErr } = existingOrder
-        ? await supabaseAdmin.from('orders').update(orderFields).eq('reference', String(reference))
-        : await supabaseAdmin.from('orders').insert({
-            id: `ord-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-            reference: String(reference),
-            ...orderFields
-          });
+      const { error: orderWriteErr } = await supabaseAdmin.from('orders').insert({
+        id: `ord-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        reference,
+        ...orderFields
+      });
 
       if (orderWriteErr) {
         res.status(500).json({
@@ -1321,7 +1442,7 @@ async function startServer() {
         } = {
           firstname: String(customerName || 'Apprenant').split(' ')[0],
           lastname: String(customerName || 'DJIFFA').split(' ').slice(1).join(' ') || 'Academy',
-          email: customerEmail
+          email: effectiveEmail
         };
         if (normalizedPhone) {
           customerPayload.phone_number = normalizedPhone;
@@ -1348,7 +1469,7 @@ async function startServer() {
         if (!response.ok) {
           const errMsg = extractFedaPayApiError(rawTxBody, `Erreur API FedaPay (HTTP ${response.status}).`);
           recordPaymentEvent({
-            reference: String(reference),
+            reference,
             provider: 'fedapay',
             event: 'create_session_error',
             status: 'failed',
@@ -1373,7 +1494,7 @@ async function startServer() {
               provider_transaction_id: fedaTxId,
               ...(normalizedPhone ? { customer_phone: normalizedPhone.number } : {})
             })
-            .eq('reference', String(reference));
+            .eq('reference', reference);
         }
 
         // Generate hosted checkout token URL via FedaPay /transactions/:id/token when needed
@@ -1393,7 +1514,7 @@ async function startServer() {
               `Impossible d’obtenir l’URL de paiement FedaPay (HTTP ${tokenRes.status}).`
             );
             recordPaymentEvent({
-              reference: String(reference),
+              reference,
               provider: 'fedapay',
               event: 'create_session_error',
               status: 'failed',
@@ -1409,7 +1530,7 @@ async function startServer() {
         if (!paymentUrl) {
           const missingUrlMsg = 'FedaPay n’a pas renvoyé d’URL de paiement hébergée.';
           recordPaymentEvent({
-            reference: String(reference),
+            reference,
             provider: 'fedapay',
             event: 'create_session_error',
             status: 'failed',
@@ -1420,7 +1541,7 @@ async function startServer() {
         }
 
         recordPaymentEvent({
-          reference: String(reference),
+          reference,
           provider: 'fedapay',
           event: 'create_session',
           status: 'pending',
@@ -1432,6 +1553,7 @@ async function startServer() {
         res.json({
           ok: true,
           provider: 'fedapay',
+          reference,
           transactionId: tx?.id,
           paymentUrl,
           verifiedAmount
@@ -1454,7 +1576,7 @@ async function startServer() {
             return_url: `${appUrl}/?payment_ref=${encodeURIComponent(reference)}`,
             channels: 'ALL',
             customer_name: customerName || 'Apprenant',
-            customer_email: customerEmail,
+            customer_email: effectiveEmail,
             customer_phone_number: customerPhone || ''
           })
         });
@@ -1470,6 +1592,7 @@ async function startServer() {
         res.json({
           ok: true,
           provider: 'cinetpay',
+          reference,
           paymentUrl: data.data?.payment_url || null,
           paymentToken: data.data?.payment_token || null,
           verifiedAmount
@@ -1494,7 +1617,7 @@ async function startServer() {
   });
 
   // 5. Server-side transaction verification + automatic Supabase enrollment
-  app.post('/api/payments/verify', async (req, res) => {
+  app.post('/api/payments/verify', paymentApiLimiter, async (req, res) => {
     const status = getServerPaymentStatus();
     const { transactionId, reference } = req.body || {};
 
@@ -1503,38 +1626,11 @@ async function startServer() {
       return;
     }
 
-    const cleanRef = String(reference).trim();
-    const cachedTx = processedTransactions.get(cleanRef);
-    if (cachedTx?.status === 'confirmed') {
-      const enrollSync = await activateOrderEnrollmentInSupabase(cleanRef);
-      if (enrollSync && enrollSync.ok === false && !enrollSync.skipped) {
-        res.status(500).json({
-          ok: false,
-          verified: false,
-          temporaryError: true,
-          status: 'confirmed',
-          error: `Commande confirmée, mais synchronisation de l’inscription impossible (${enrollSync.error}).`
-        });
-        return;
-      }
-      res.json({
-        ok: true,
-        alreadyVerified: true,
-        verified: true,
-        status: 'confirmed',
-        courseId: enrollSync?.courseId,
-        userId: enrollSync?.userId
-      });
-      return;
-    }
-    if (cachedTx?.status === 'refunded') {
-      res.json({
+    const caller = await resolveCallerAuth(req);
+    if (supabaseAdmin && !caller.isAdmin && (!caller.userId || !/^[0-9a-f-]{36}$/i.test(caller.userId))) {
+      res.status(401).json({
         ok: false,
-        alreadyVerified: true,
-        verified: false,
-        finalFailure: true,
-        status: 'refunded',
-        error: 'Cette commande a déjà été remboursée.'
+        error: 'Authentification apprenant requise pour vérifier cette commande.'
       });
       return;
     }
@@ -1548,6 +1644,7 @@ async function startServer() {
       return;
     }
 
+    const cleanRef = String(reference).trim();
     let storedOrderAmount: number | null = null;
     let storedOrderCurrency: string | null = null;
     let storedOrderStatus: string | null = null;
@@ -1556,7 +1653,7 @@ async function startServer() {
     if (supabaseAdmin) {
       const { data: orderRow, error: orderErr } = await supabaseAdmin
         .from('orders')
-        .select('amount, currency, status, provider_transaction_id, course_id, user_id')
+        .select('amount, currency, status, provider_transaction_id, course_id, user_id, user_email')
         .eq('reference', cleanRef)
         .maybeSingle();
       if (orderErr) {
@@ -1567,7 +1664,35 @@ async function startServer() {
         });
         return;
       }
-      if (orderRow?.status === 'confirmed') {
+      if (!orderRow) {
+        res.status(404).json({
+          ok: false,
+          verified: false,
+          error: 'Commande introuvable pour cette référence.'
+        });
+        return;
+      }
+      if (!caller.isAdmin) {
+        const lookupUserIds = await resolveCallerLookupIds(caller.userId, caller.email);
+        const cleanCallerEmail = (caller.email || '').trim().toLowerCase();
+        const ownerById = Boolean(orderRow.user_id && lookupUserIds.has(String(orderRow.user_id)));
+        const ownerByEmail = Boolean(
+          !orderRow.user_id &&
+            cleanCallerEmail &&
+            orderRow.user_email &&
+            String(orderRow.user_email).trim().toLowerCase() === cleanCallerEmail
+        );
+        if (!ownerById && !ownerByEmail) {
+          res.status(403).json({
+            ok: false,
+            verified: false,
+            error: 'Accès refusé : cette commande appartient à un autre compte.'
+          });
+          return;
+        }
+      }
+
+      if (orderRow.status === 'confirmed') {
         const enrollSync = await activateOrderEnrollmentInSupabase(
           cleanRef,
           orderRow.provider_transaction_id ? String(orderRow.provider_transaction_id) : undefined
@@ -1592,12 +1717,11 @@ async function startServer() {
           alreadyVerified: true,
           verified: true,
           status: 'confirmed',
-          courseId: enrollSync?.courseId || orderRow.course_id || undefined,
-          userId: enrollSync?.userId || orderRow.user_id || undefined
+          courseId: enrollSync?.courseId || orderRow.course_id || undefined
         });
         return;
       }
-      if (orderRow?.status === 'refunded') {
+      if (orderRow.status === 'refunded') {
         processedTransactions.set(cleanRef, {
           status: 'refunded',
           verifiedAt: new Date().toISOString(),
@@ -1613,11 +1737,26 @@ async function startServer() {
         });
         return;
       }
-      if (orderRow) {
-        if (typeof orderRow.amount === 'number') storedOrderAmount = orderRow.amount;
-        storedOrderCurrency = orderRow.currency || null;
-        storedOrderStatus = orderRow.status || null;
-        storedProviderTxId = orderRow.provider_transaction_id ? String(orderRow.provider_transaction_id).trim() : null;
+      if (typeof orderRow.amount === 'number') storedOrderAmount = orderRow.amount;
+      storedOrderCurrency = orderRow.currency || null;
+      storedOrderStatus = orderRow.status || null;
+      storedProviderTxId = orderRow.provider_transaction_id ? String(orderRow.provider_transaction_id).trim() : null;
+    } else {
+      const cachedTx = processedTransactions.get(cleanRef);
+      if (cachedTx?.status === 'confirmed') {
+        res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
+        return;
+      }
+      if (cachedTx?.status === 'refunded') {
+        res.json({
+          ok: false,
+          alreadyVerified: true,
+          verified: false,
+          finalFailure: true,
+          status: 'refunded',
+          error: 'Cette commande a déjà été remboursée.'
+        });
+        return;
       }
     }
 
@@ -1718,8 +1857,7 @@ async function startServer() {
             status: 'confirmed',
             providerStatus: txStatus,
             transactionId: resolvedTxId,
-            courseId: enrollRes?.courseId,
-            userId: enrollRes?.userId
+            courseId: enrollRes?.courseId
           });
           return;
         }
@@ -2382,7 +2520,7 @@ async function startServer() {
   });
 
   // 8. Admin Verification & Session Token
-  app.post('/api/auth/admin-verify', (req, res) => {
+  app.post('/api/auth/admin-verify', adminLoginLimiter, (req, res) => {
     const { email, accessCode } = req.body || {};
     const expectedEmail = (process.env.ADMIN_EMAIL || 'faith.ariola@djiffa-agency.com').toLowerCase();
     const expectedCode = (process.env.ADMIN_ACCESS_CODE || '').trim();
@@ -2431,14 +2569,14 @@ async function startServer() {
 
   // 9. Protected Media Signed URL (Enforces enrollment or admin before issuing Supabase signed URL)
   app.post('/api/media/signed-url', async (req, res) => {
-    if (!supabaseAdmin) {
-      res.status(400).json({ ok: false, error: 'Supabase Storage non configuré côté serveur.' });
-      return;
-    }
-
     const caller = await resolveCallerAuth(req);
     if (!caller.userId && !caller.isAdmin) {
       res.status(401).json({ ok: false, error: 'Authentification requise pour accéder à cette ressource privée.' });
+      return;
+    }
+
+    if (!supabaseAdmin) {
+      res.status(400).json({ ok: false, error: 'Supabase Storage non configuré côté serveur.' });
       return;
     }
 
@@ -2455,20 +2593,85 @@ async function startServer() {
     }
 
     if (!caller.isAdmin) {
-      if (!courseId || !caller.userId) {
+      const cleanCourseId = String(courseId || '').trim();
+      if (!cleanCourseId || !caller.userId || !/^[0-9a-f-]{36}$/i.test(caller.userId)) {
         res.status(403).json({ ok: false, error: 'Accès refusé : inscription non vérifiée.' });
         return;
       }
-      const { data: enrollment } = await supabaseAdmin
-        .from('enrollments')
-        .select('id')
-        .eq('user_id', caller.userId)
-        .eq('course_id', String(courseId))
-        .maybeSingle();
 
-      if (!enrollment) {
+      const lookupUserIds = await resolveCallerLookupIds(caller.userId, caller.email);
+      const idList = Array.from(lookupUserIds);
+      const cleanEmail = (caller.email || '').trim().toLowerCase();
+
+      let enrolledAuthorized = false;
+      if (idList.length > 0) {
+        const { data: enrollmentRows } = await supabaseAdmin
+          .from('enrollments')
+          .select('id')
+          .in('user_id', idList)
+          .eq('course_id', cleanCourseId)
+          .limit(1);
+        if (enrollmentRows && enrollmentRows.length > 0) {
+          enrolledAuthorized = true;
+        }
+      }
+
+      // Reconcile if the authenticated learner has a confirmed order for this course whose enrollment row wasn't linked yet
+      if (!enrolledAuthorized) {
+        const [byIdRes, byEmailRes] = await Promise.all([
+          idList.length > 0
+            ? supabaseAdmin
+                .from('orders')
+                .select('reference, user_id, user_email')
+                .in('user_id', idList)
+                .eq('course_id', cleanCourseId)
+                .eq('status', 'confirmed')
+                .limit(1)
+            : Promise.resolve({ data: [], error: null }),
+          cleanEmail
+            ? supabaseAdmin
+                .from('orders')
+                .select('reference, user_id, user_email')
+                .ilike('user_email', cleanEmail)
+                .eq('course_id', cleanCourseId)
+                .eq('status', 'confirmed')
+                .limit(1)
+            : Promise.resolve({ data: [], error: null })
+        ]);
+
+        const candidateOrders = [...(byIdRes.data || []), ...(byEmailRes.data || [])].filter((o: any) => {
+          const matchesId = Boolean(o.user_id && lookupUserIds.has(String(o.user_id)));
+          const matchesEmail = Boolean(
+            !o.user_id && cleanEmail && String(o.user_email || '').trim().toLowerCase() === cleanEmail
+          );
+          return Boolean(o?.reference) && (matchesId || matchesEmail);
+        });
+
+        if (candidateOrders.length > 0) {
+          const syncRes = await activateOrderEnrollmentInSupabase(String(candidateOrders[0].reference));
+          if (syncRes.ok) {
+            enrolledAuthorized = true;
+          }
+        }
+      }
+
+      if (!enrolledAuthorized) {
         res.status(403).json({ ok: false, error: 'Vous devez acquérir cette formation pour lire cette ressource.' });
         return;
+      }
+
+      // Prevent accessing private media files belonging to another course
+      const expectedRef = `sb://${bucket}/${safePath}`;
+      if (!safePath.startsWith(`${cleanCourseId}/`)) {
+        const { data: privCourse } = await supabaseAdmin
+          .from('course_private_contents')
+          .select('modules_payload')
+          .eq('course_id', cleanCourseId)
+          .maybeSingle();
+        if (privCourse?.modules_payload && !JSON.stringify(privCourse.modules_payload).includes(expectedRef)) {
+          res.status(403).json({ ok: false, error: 'Ressource privée non rattachée à cette formation.' });
+          return;
+        }
       }
     }
 

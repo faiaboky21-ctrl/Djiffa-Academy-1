@@ -400,9 +400,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [students, setStudents] = useState<User[]>(() => {
     const saved = localStorage.getItem('djiffa_students');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+      try {
+        const parsed = JSON.parse(saved) as User[];
+        return isSupabaseConfigured ? parsed.filter((s) => s.id !== 'usr-student-amara') : parsed;
+      } catch (e) { console.error(e); }
     }
-    return INITIAL_DEMO_STUDENTS;
+    return isSupabaseConfigured ? [] : INITIAL_DEMO_STUDENTS;
   });
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -411,7 +414,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (savedLocal) {
       try {
         const parsed = JSON.parse(savedLocal) as User;
-        if (parsed.role === 'admin') {
+        if (parsed.role === 'admin' || (isSupabaseConfigured && parsed.id === 'usr-student-amara')) {
           localStorage.removeItem('djiffa_user');
         } else {
           return parsed;
@@ -439,17 +442,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [orders, setOrders] = useState<Order[]>(() => {
     const saved = localStorage.getItem('djiffa_orders');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+      try {
+        const parsed = JSON.parse(saved) as Order[];
+        return isSupabaseConfigured
+          ? parsed.filter((o) => o.id !== 'ord-demo-1001' && o.reference !== 'DEMO-2026-98421')
+          : parsed;
+      } catch (e) { console.error(e); }
     }
-    return INITIAL_ORDERS;
+    return isSupabaseConfigured ? [] : INITIAL_ORDERS;
   });
 
   const [coachingRequests, setCoachingRequests] = useState<CoachingRequest[]>(() => {
     const saved = localStorage.getItem('djiffa_coaching');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+      try {
+        const parsed = JSON.parse(saved) as CoachingRequest[];
+        return isSupabaseConfigured ? parsed.filter((r) => r.id !== 'coaching-demo-1') : parsed;
+      } catch (e) { console.error(e); }
     }
-    return INITIAL_COACHING;
+    return isSupabaseConfigured ? [] : INITIAL_COACHING;
   });
 
   const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
@@ -780,7 +791,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
         );
 
-        if (mergedOrderRows.length > 0) {
+        if (mergedOrderRows.length > 0 || enrollmentSourceReadable) {
           setOrders(
             mergedOrderRows.map((o: any) => ({
               id: o.id,
@@ -805,7 +816,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
 
-        if (coachReqRows && coachReqRows.length > 0) {
+        if (Array.isArray(coachReqRows)) {
           setCoachingRequests(
             coachReqRows.map((r: any) => ({
               id: r.id,
@@ -906,7 +917,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         progByUser.set(p.user_id, arr);
       });
 
-      if (Array.isArray(data.profiles) && data.profiles.length > 0) {
+      if (Array.isArray(data.profiles)) {
         const mappedStudents: User[] = data.profiles
           .filter((p: any) => p.role !== 'admin')
           .map((p: any) => {
@@ -938,7 +949,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setStudents(mappedStudents);
       }
 
-      if (Array.isArray(data.orders) && data.orders.length > 0) {
+      if (Array.isArray(data.orders)) {
         setOrders(
           data.orders.map((o: any) => ({
             id: o.id,
@@ -963,7 +974,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
 
-      if (Array.isArray(data.coachingRequests) && data.coachingRequests.length > 0) {
+      if (Array.isArray(data.coachingRequests)) {
         setCoachingRequests(
           data.coachingRequests.map((r: any) => ({
             id: r.id,
@@ -1377,6 +1388,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auth Functions (Local fallback + Real Supabase Auth)
   const loginAsDemoStudent = () => {
+    if (isSupabaseConfigured) return;
     const demo = students.find((s) => s.id === 'usr-student-amara') || INITIAL_DEMO_STUDENTS[0];
     setCurrentUser(demo);
     setAuthModalOpen(false);
@@ -1826,9 +1838,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Real server-side verification when gateway is configured (for paid courses)
     if (finalAmount > 0 && paymentConfig.serverConfigured) {
+      const verifyHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      const supabaseToken = await getSupabaseAccessToken();
+      if (supabaseToken) {
+        verifyHeaders['Authorization'] = `Bearer ${supabaseToken}`;
+      }
       const verifyRes = await fetch('/api/payments/verify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: verifyHeaders,
         body: JSON.stringify({ reference: orderRef, transactionId: options?.transactionId })
       });
       const verifyData = await verifyRes.json();

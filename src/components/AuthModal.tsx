@@ -221,23 +221,23 @@ export const AuthModal: React.FC = () => {
                 <span>{loading ? 'Connexion...' : 'Accéder à mon espace'}</span>
               </button>
 
-              <div className="pt-3 border-t border-zinc-800/80 space-y-2">
-                {!supabaseReady && (
+              {!supabaseReady && (
+                <div className="pt-3 border-t border-zinc-800/80 space-y-2">
                   <div className="p-3 rounded-lg bg-zinc-900/70 border border-zinc-800 text-[11px] text-zinc-400 flex items-start gap-2">
                     <Info className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
                     <span>
                       Mode Local : variables Supabase non renseignées. Vos données sont sauvegardées sur cet appareil et vous pouvez tester le compte démo ci-dessous.
                     </span>
                   </div>
-                )}
-                <button
-                  type="button"
-                  onClick={loginAsDemoStudent}
-                  className="w-full py-2.5 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-semibold cursor-pointer"
-                >
-                  Explorer avec le compte Apprenant Démo (Amara Diallo)
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={loginAsDemoStudent}
+                    className="w-full py-2.5 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-semibold cursor-pointer"
+                  >
+                    Explorer avec le compte Apprenant Démo (Amara Diallo)
+                  </button>
+                </div>
+              )}
             </form>
           )}
 

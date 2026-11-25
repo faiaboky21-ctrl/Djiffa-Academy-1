@@ -212,7 +212,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
 
       // Real server payment session initialization
       if (paymentConfig.serverConfigured && !forceDemoTest) {
-        const ref = `DJF-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
         const sessionHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
         const supabaseToken = await getSupabaseAccessToken();
         if (supabaseToken) {
@@ -222,12 +221,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
           method: 'POST',
           headers: sessionHeaders,
           body: JSON.stringify({
-            reference: ref,
             amount: finalAmount,
             currency,
             description: course.title,
             courseId: course.id,
-            userId: currentUser.id,
             customerEmail: currentUser.email,
             customerName: currentUser.name,
             customerPhone: phoneNumber || currentUser.phone,
@@ -237,22 +234,24 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ course, onClose })
         });
         const sessionData = await sessionRes.json();
 
-        if (sessionData.ok && sessionData.paymentUrl) {
-          setPendingRef(ref);
+        const serverRef = typeof sessionData.reference === 'string' ? sessionData.reference : null;
+
+        if (sessionRes.ok && sessionData.ok && sessionData.paymentUrl && serverRef) {
+          setPendingRef(serverRef);
           if (sessionData.transactionId) setPendingTxId(String(sessionData.transactionId));
           setExternalPaymentUrl(sessionData.paymentUrl);
           setStep('details');
           return;
         }
 
-        if (sessionData.ok && sessionData.provider === 'kkiapay') {
-          setPendingRef(ref);
+        if (sessionRes.ok && sessionData.ok && sessionData.provider === 'kkiapay' && serverRef) {
+          setPendingRef(serverRef);
           setExternalPaymentUrl(`https://widget.kkiapay.me/?amount=${finalAmount}&key=${encodeURIComponent(sessionData.publicKey || '')}&sandbox=${sessionData.sandbox ? 'true' : 'false'}&callback=${encodeURIComponent(sessionData.callbackUrl || window.location.origin)}`);
           setStep('details');
           return;
         }
 
-        if (!sessionData.ok) {
+        if (!sessionRes.ok || (!sessionData.ok && !sessionData.notConfigured)) {
           setStep('failed');
           setErrorMessage(sessionData.error || sessionData.message || 'Impossible d’initialiser le paiement.');
           return;

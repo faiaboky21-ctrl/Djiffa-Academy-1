@@ -157,6 +157,7 @@ interface AppContextType {
     temporaryError?: boolean;
     status?: Order['status'];
     providerStatus?: string;
+    courseId?: string;
     message?: string;
   }>;
   refreshServerPaymentStatus: () => Promise<void>;
@@ -670,17 +671,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     async (authUserId: string, fallbackEmail?: string) => {
       if (!supabase) return;
       try {
-        const [{ data: profile }, { data: enrollRows }, { data: progRows }, { data: certRows }, { data: orderRows }, { data: coachReqRows }] =
-          await Promise.all([
-            supabase.from('profiles').select('*').eq('id', authUserId).maybeSingle(),
-            supabase.from('enrollments').select('*').eq('user_id', authUserId),
-            supabase.from('lesson_progress').select('*').eq('user_id', authUserId),
-            supabase.from('certificates').select('*').eq('user_id', authUserId),
-            supabase.from('orders').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
-            supabase.from('coaching_requests').select('*').eq('user_id', authUserId).order('created_at', { ascending: false })
-          ]);
+        const accessToken = await getSupabaseAccessToken();
+        const serverEnrollPromise = accessToken
+          ? fetch('/api/student/enrollments', {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null)
+          : Promise.resolve(null);
 
-        const enrolledCourseIds = (enrollRows || []).map((e: any) => e.course_id);
+        const [
+          { data: profile },
+          enrollRes,
+          { data: progRows },
+          { data: certRows },
+          ordersRes,
+          { data: coachReqRows },
+          serverEnrollData
+        ] = await Promise.all([
+          supabase.from('profiles').select('*').eq('id', authUserId).maybeSingle(),
+          supabase.from('enrollments').select('*').eq('user_id', authUserId),
+          supabase.from('lesson_progress').select('*').eq('user_id', authUserId),
+          supabase.from('certificates').select('*').eq('user_id', authUserId),
+          supabase.from('orders').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
+          supabase.from('coaching_requests').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
+          serverEnrollPromise
+        ]);
+
+        if (enrollRes.error) {
+          console.warn('Supabase enrollments read warning:', enrollRes.error.message);
+        }
+        if (ordersRes.error) {
+          console.warn('Supabase orders read warning:', ordersRes.error.message);
+        }
+
+        const browserEnrolledIds: string[] =
+          !enrollRes.error && Array.isArray(enrollRes.data)
+            ? enrollRes.data.map((e: any) => String(e.course_id || '')).filter(Boolean)
+            : [];
+        const serverEnrolledIds: string[] =
+          serverEnrollData?.ok && Array.isArray(serverEnrollData.enrolledCourseIds)
+            ? serverEnrollData.enrolledCourseIds.map((id: unknown) => String(id || '')).filter(Boolean)
+            : [];
+
+        const enrollmentSourceReadable = !enrollRes.error || Boolean(serverEnrollData?.ok);
+        const mergedEnrolledIds = Array.from(new Set([...browserEnrolledIds, ...serverEnrolledIds]));
+
         const completedLessonIds = Array.from(
           new Set((progRows || []).flatMap((p: any) => p.completed_lesson_ids || []))
         );
@@ -710,30 +746,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           directorName: c.director_name
         }));
 
-        const hydratedUser: User = {
-          id: authUserId,
-          email: profile?.email || fallbackEmail || '',
-          name: profile?.name || fallbackEmail?.split('@')[0] || 'Apprenant DJIFFA',
-          role: profile?.role === 'admin' ? 'admin' : 'student',
-          phone: profile?.phone || undefined,
-          country: profile?.country || 'Bénin',
-          enrolledCourseIds,
-          completedLessonIds,
-          lastAccessedLessonByCourse,
-          submittedExercises,
-          quizScores,
-          certificates,
-          createdAt: profile?.created_at
-        };
+        setCurrentUser((prev) => {
+          const preservedEnrolledIds =
+            !enrollmentSourceReadable && prev?.id === authUserId ? prev.enrolledCourseIds : [];
+          const finalEnrolledIds = Array.from(new Set([...mergedEnrolledIds, ...preservedEnrolledIds]));
+          return {
+            id: authUserId,
+            email: profile?.email || fallbackEmail || prev?.email || '',
+            name: profile?.name || fallbackEmail?.split('@')[0] || prev?.name || 'Apprenant DJIFFA',
+            role: profile?.role === 'admin' ? 'admin' : 'student',
+            phone: profile?.phone || prev?.phone || undefined,
+            country: profile?.country || prev?.country || 'Bénin',
+            enrolledCourseIds: finalEnrolledIds,
+            completedLessonIds,
+            lastAccessedLessonByCourse,
+            submittedExercises,
+            quizScores,
+            certificates,
+            createdAt: profile?.created_at || prev?.createdAt
+          };
+        });
 
-        setCurrentUser(hydratedUser);
+        const rawBrowserOrders = !ordersRes.error && Array.isArray(ordersRes.data) ? ordersRes.data : [];
+        const rawServerOrders =
+          serverEnrollData?.ok && Array.isArray(serverEnrollData.orders) ? serverEnrollData.orders : [];
+        const mergedOrderMap = new Map<string, any>();
+        [...rawBrowserOrders, ...rawServerOrders].forEach((o: any) => {
+          if (o?.reference && !mergedOrderMap.has(String(o.reference))) {
+            mergedOrderMap.set(String(o.reference), o);
+          }
+        });
+        const mergedOrderRows = Array.from(mergedOrderMap.values()).sort(
+          (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+        );
 
-        if (orderRows && orderRows.length > 0) {
+        if (mergedOrderRows.length > 0) {
           setOrders(
-            orderRows.map((o: any) => ({
+            mergedOrderRows.map((o: any) => ({
               id: o.id,
               reference: o.reference,
-              userId: o.user_id,
+              userId: o.user_id || '',
               userName: o.user_name,
               userEmail: o.user_email,
               courseId: o.course_id,
@@ -986,12 +1038,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const verifyExistingPayment = useCallback(
     async (reference: string, transactionId?: string, courseId?: string) => {
       try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        const supabaseToken = await getSupabaseAccessToken();
+        if (supabaseToken) {
+          headers['Authorization'] = `Bearer ${supabaseToken}`;
+        }
         const res = await fetch('/api/payments/verify', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ reference, transactionId })
         });
         const data = await res.json();
+        const resolvedCourseId: string | undefined = data.courseId || courseId;
         if (res.ok && data.verified) {
           const confirmedTxId = data.transactionId ? String(data.transactionId) : transactionId;
           setOrders((prev) =>
@@ -1006,15 +1064,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 : o
             )
           );
-          if (courseId && currentUser) {
+          if (resolvedCourseId) {
             setCurrentUser((prev) =>
               prev
-                ? { ...prev, enrolledCourseIds: Array.from(new Set([...prev.enrolledCourseIds, courseId])) }
+                ? { ...prev, enrolledCourseIds: Array.from(new Set([...prev.enrolledCourseIds, resolvedCourseId])) }
                 : prev
             );
           }
-          if (isSupabaseConfigured && currentUser && isUuid(currentUser.id)) {
-            await hydrateSupabaseUser(currentUser.id, currentUser.email);
+          if (isSupabaseConfigured && supabase) {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData.session?.user) {
+              await hydrateSupabaseUser(sessionData.session.user.id, sessionData.session.user.email);
+            } else if (currentUser && isUuid(currentUser.id)) {
+              await hydrateSupabaseUser(currentUser.id, currentUser.email);
+            }
           }
           pushNotification(
             currentUser?.id || 'all',
@@ -1027,6 +1090,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             verified: true,
             status: 'confirmed' as const,
             providerStatus: data.providerStatus,
+            courseId: resolvedCourseId,
             message: 'Paiement vérifié et accès activé.'
           };
         }
@@ -1056,8 +1120,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 : o
             )
           );
-          if (isSupabaseConfigured && currentUser && isUuid(currentUser.id)) {
-            await hydrateSupabaseUser(currentUser.id, currentUser.email);
+          if (isSupabaseConfigured && supabase) {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData.session?.user) {
+              await hydrateSupabaseUser(sessionData.session.user.id, sessionData.session.user.email);
+            } else if (currentUser && isUuid(currentUser.id)) {
+              await hydrateSupabaseUser(currentUser.id, currentUser.email);
+            }
           }
         }
 
@@ -1068,6 +1137,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           temporaryError: isTemporary,
           status: reportedStatus,
           providerStatus: data.providerStatus,
+          courseId: resolvedCourseId,
           message:
             data.error ||
             (reportedStatus === 'failed'
@@ -1125,16 +1195,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     (async () => {
       const result = await verifyExistingPayment(paymentRef, txId);
+      let hasActiveSession = false;
       if (isSupabaseConfigured && supabase) {
         const { data } = await supabase.auth.getSession();
         if (data.session?.user) {
+          hasActiveSession = true;
           await hydrateSupabaseUser(data.session.user.id, data.session.user.email);
         }
       }
       if (result.verified) {
+        if (result.courseId && !isSupabaseConfigured) {
+          setCurrentUser((prev) =>
+            prev
+              ? { ...prev, enrolledCourseIds: Array.from(new Set([...prev.enrolledCourseIds, result.courseId!])) }
+              : prev
+          );
+        }
         setPaymentReturnNotice({
           type: 'success',
-          message: `Paiement confirmé (${paymentRef}). Votre formation est désormais accessible dans votre Espace Apprenant.`
+          message:
+            isSupabaseConfigured && !hasActiveSession
+              ? `Paiement confirmé (${paymentRef}). Connectez-vous avec votre email d’achat pour accéder à votre formation dans votre Espace Apprenant.`
+              : `Paiement confirmé (${paymentRef}). Votre formation est désormais accessible dans votre Espace Apprenant.`
         });
       } else if (result.finalFailure) {
         setPaymentReturnNotice({

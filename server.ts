@@ -285,6 +285,45 @@ async function resolveCallerAuth(req: express.Request): Promise<{
   return { isAdmin: false, userId: null, email: null };
 }
 
+async function findAuthUserIdByEmail(email: string): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail) return null;
+  try {
+    let page = 1;
+    const perPage = 200;
+    while (page <= 10) {
+      const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+      if (error || !data?.users?.length) break;
+      const matched = data.users.find((u) => (u.email || '').trim().toLowerCase() === cleanEmail);
+      if (matched?.id) {
+        await supabaseAdmin
+          .from('profiles')
+          .upsert(
+            {
+              id: matched.id,
+              email: matched.email || cleanEmail,
+              name:
+                (matched.user_metadata?.name as string | undefined)?.trim() ||
+                cleanEmail.split('@')[0] ||
+                'Apprenant DJIFFA',
+              phone: (matched.user_metadata?.phone as string | undefined) || null,
+              country: (matched.user_metadata?.country as string | undefined) || 'Bénin',
+              role: 'student'
+            },
+            { onConflict: 'id', ignoreDuplicates: true }
+          );
+        return matched.id;
+      }
+      if (data.users.length < perPage) break;
+      page += 1;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function activateOrderEnrollmentInSupabase(reference: string, providerTransactionId?: string) {
   if (!supabaseAdmin) return { ok: false, skipped: true };
   const { data: orderRow, error: fetchErr } = await supabaseAdmin
@@ -307,27 +346,57 @@ async function activateOrderEnrollmentInSupabase(reference: string, providerTran
       .maybeSingle();
     if (matchedProfile?.id) {
       targetUserId = matchedProfile.id;
+    } else {
+      targetUserId = await findAuthUserIdByEmail(String(orderRow.user_email));
     }
   }
 
   const nextTxId = providerTransactionId || orderRow.provider_transaction_id || null;
   const alreadyConfirmed = orderRow.status === 'confirmed';
 
-  const { error: updateErr } = await supabaseAdmin
-    .from('orders')
-    .update({
-      status: 'confirmed',
-      user_id: targetUserId,
-      provider_transaction_id: nextTxId,
-      confirmed_at: orderRow.confirmed_at || new Date().toISOString()
-    })
-    .eq('reference', reference);
-
-  if (updateErr) {
-    return { ok: false, error: updateErr.message };
+  if (!targetUserId || !orderRow.course_id) {
+    return {
+      ok: false,
+      error: !targetUserId
+        ? 'Impossible d’associer cette commande à un profil apprenant Supabase valide.'
+        : 'Identifiant de formation manquant sur la commande.'
+    };
   }
 
-  if (targetUserId && orderRow.course_id) {
+  const needsOrderUpdate =
+    !alreadyConfirmed ||
+    orderRow.user_id !== targetUserId ||
+    (nextTxId && orderRow.provider_transaction_id !== nextTxId);
+
+  if (needsOrderUpdate) {
+    const { error: updateErr } = await supabaseAdmin
+      .from('orders')
+      .update({
+        status: 'confirmed',
+        user_id: targetUserId,
+        provider_transaction_id: nextTxId,
+        confirmed_at: orderRow.confirmed_at || new Date().toISOString()
+      })
+      .eq('reference', reference);
+
+    if (updateErr) {
+      return { ok: false, error: updateErr.message };
+    }
+  }
+
+  // Check first so an existing enrollment is never duplicated
+  const { data: existingEnrollment, error: existingEnrollErr } = await supabaseAdmin
+    .from('enrollments')
+    .select('id')
+    .eq('user_id', targetUserId)
+    .eq('course_id', orderRow.course_id)
+    .maybeSingle();
+
+  if (existingEnrollErr) {
+    return { ok: false, error: existingEnrollErr.message };
+  }
+
+  if (!existingEnrollment) {
     const { error: enrollErr } = await supabaseAdmin.from('enrollments').upsert(
       {
         user_id: targetUserId,
@@ -341,7 +410,13 @@ async function activateOrderEnrollmentInSupabase(reference: string, providerTran
     }
   }
 
-  return { ok: true, alreadyConfirmed };
+  return {
+    ok: true,
+    alreadyConfirmed,
+    alreadyEnrolled: Boolean(existingEnrollment),
+    userId: targetUserId,
+    courseId: orderRow.course_id
+  };
 }
 
 async function syncNonConfirmedOrderStatusInSupabase(
@@ -731,6 +806,94 @@ async function startServer() {
       },
       environment: isProduction ? 'production' : 'development'
     });
+  });
+
+  // 3a. Authenticated Student Enrollments & Orders Read (server-verified JWT, immune to browser RLS/grant quirks)
+  app.get('/api/student/enrollments', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.userId) {
+      res.status(401).json({ ok: false, error: 'Authentification apprenant requise.' });
+      return;
+    }
+    if (!supabaseAdmin) {
+      res.json({ ok: false, notConfigured: true });
+      return;
+    }
+
+    try {
+      const cleanEmail = (caller.email || '').trim().toLowerCase();
+      const lookupUserIds = new Set<string>();
+      if (/^[0-9a-f-]{36}$/i.test(caller.userId)) {
+        lookupUserIds.add(caller.userId);
+      }
+
+      if (cleanEmail) {
+        const { data: emailProfiles } = await supabaseAdmin
+          .from('profiles')
+          .select('id')
+          .ilike('email', cleanEmail);
+        (emailProfiles || []).forEach((p: { id?: string }) => {
+          if (p.id && /^[0-9a-f-]{36}$/i.test(p.id)) lookupUserIds.add(p.id);
+        });
+      }
+
+      const idList = Array.from(lookupUserIds);
+      const [enrollByIdRes, ordersByIdRes, ordersByEmailRes] = await Promise.all([
+        idList.length > 0
+          ? supabaseAdmin.from('enrollments').select('*').in('user_id', idList)
+          : Promise.resolve({ data: [], error: null }),
+        idList.length > 0
+          ? supabaseAdmin.from('orders').select('*').in('user_id', idList).order('created_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null }),
+        cleanEmail
+          ? supabaseAdmin.from('orders').select('*').ilike('user_email', cleanEmail).order('created_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null })
+      ]);
+
+      const enrollmentRows: any[] = Array.isArray(enrollByIdRes.data) ? [...enrollByIdRes.data] : [];
+      const enrolledCourseSet = new Set<string>(
+        enrollmentRows.map((e) => String(e.course_id || '')).filter(Boolean)
+      );
+
+      // Merge orders owned by user_id or verified email (deduplicated by reference)
+      const orderMap = new Map<string, any>();
+      [...(ordersByIdRes.data || []), ...(ordersByEmailRes.data || [])].forEach((o: any) => {
+        if (!o?.reference) return;
+        const orderOwnerMatches =
+          (o.user_id && lookupUserIds.has(String(o.user_id))) ||
+          (!o.user_id && cleanEmail && String(o.user_email || '').trim().toLowerCase() === cleanEmail);
+        if (orderOwnerMatches && !orderMap.has(String(o.reference))) {
+          orderMap.set(String(o.reference), o);
+        }
+      });
+
+      const studentOrders = Array.from(orderMap.values()).sort(
+        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      );
+
+      // Reconcile ONLY already-confirmed orders that lack an enrollment row (never creates duplicates, never alters order status)
+      for (const ord of studentOrders) {
+        if (ord.status === 'confirmed' && ord.course_id && !enrolledCourseSet.has(String(ord.course_id))) {
+          const syncRes = await activateOrderEnrollmentInSupabase(String(ord.reference));
+          if (syncRes.ok && syncRes.courseId) {
+            enrolledCourseSet.add(String(syncRes.courseId));
+          }
+        }
+      }
+
+      res.json({
+        ok: true,
+        userId: caller.userId,
+        enrolledCourseIds: Array.from(enrolledCourseSet),
+        enrollments: enrollmentRows,
+        orders: studentOrders
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur lecture des inscriptions.'
+      });
+    }
   });
 
   // 3b. Public Contact Form Submission (persisted server-side & in Supabase contact_messages when available)
@@ -1343,7 +1506,25 @@ async function startServer() {
     const cleanRef = String(reference).trim();
     const cachedTx = processedTransactions.get(cleanRef);
     if (cachedTx?.status === 'confirmed') {
-      res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
+      const enrollSync = await activateOrderEnrollmentInSupabase(cleanRef);
+      if (enrollSync && enrollSync.ok === false && !enrollSync.skipped) {
+        res.status(500).json({
+          ok: false,
+          verified: false,
+          temporaryError: true,
+          status: 'confirmed',
+          error: `Commande confirmée, mais synchronisation de l’inscription impossible (${enrollSync.error}).`
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        alreadyVerified: true,
+        verified: true,
+        status: 'confirmed',
+        courseId: enrollSync?.courseId,
+        userId: enrollSync?.userId
+      });
       return;
     }
     if (cachedTx?.status === 'refunded') {
@@ -1375,7 +1556,7 @@ async function startServer() {
     if (supabaseAdmin) {
       const { data: orderRow, error: orderErr } = await supabaseAdmin
         .from('orders')
-        .select('amount, currency, status, provider_transaction_id')
+        .select('amount, currency, status, provider_transaction_id, course_id, user_id')
         .eq('reference', cleanRef)
         .maybeSingle();
       if (orderErr) {
@@ -1387,12 +1568,33 @@ async function startServer() {
         return;
       }
       if (orderRow?.status === 'confirmed') {
+        const enrollSync = await activateOrderEnrollmentInSupabase(
+          cleanRef,
+          orderRow.provider_transaction_id ? String(orderRow.provider_transaction_id) : undefined
+        );
+        if (enrollSync && enrollSync.ok === false && !enrollSync.skipped) {
+          res.status(500).json({
+            ok: false,
+            verified: false,
+            temporaryError: true,
+            status: 'confirmed',
+            error: `Commande confirmée, mais synchronisation de l’inscription impossible (${enrollSync.error}).`
+          });
+          return;
+        }
         processedTransactions.set(cleanRef, {
           status: 'confirmed',
           verifiedAt: new Date().toISOString(),
           provider: status.provider
         });
-        res.json({ ok: true, alreadyVerified: true, verified: true, status: 'confirmed' });
+        res.json({
+          ok: true,
+          alreadyVerified: true,
+          verified: true,
+          status: 'confirmed',
+          courseId: enrollSync?.courseId || orderRow.course_id || undefined,
+          userId: enrollSync?.userId || orderRow.user_id || undefined
+        });
         return;
       }
       if (orderRow?.status === 'refunded') {
@@ -1515,7 +1717,9 @@ async function startServer() {
             verified: true,
             status: 'confirmed',
             providerStatus: txStatus,
-            transactionId: resolvedTxId
+            transactionId: resolvedTxId,
+            courseId: enrollRes?.courseId,
+            userId: enrollRes?.userId
           });
           return;
         }

@@ -64,6 +64,8 @@ interface LaunchAuditResponse {
     headCommitShort: string | null;
     remoteOriginConfigured: boolean;
     remoteOriginUrl: string | null;
+    officialRepoUrl?: string;
+    source?: 'render' | 'local-git' | 'ai-studio' | 'none';
     gitignoreProtectsEnv: boolean;
     readmeReady: boolean;
     deploymentGuideReady: boolean;
@@ -517,11 +519,17 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
     return 'prepared';
   })();
 
+  const officialGithubUrl =
+    audit?.github.officialRepoUrl || 'https://github.com/faiaboky21-ctrl/Djiffa-Academy-1';
+
   const githubStatus: LaunchStepStatus = (() => {
     if (auditAuthBlocked) return 'external_action';
     if (!audit) return 'prepared';
-    if (!audit.github.gitInitialized || !audit.github.gitignoreProtectsEnv) return 'error';
+    if (!audit.github.gitignoreProtectsEnv) return 'error';
     if (audit.github.remoteOriginConfigured) return 'completed';
+    if (audit.github.source === 'render') return 'prepared';
+    if (audit.github.source === 'ai-studio') return 'prepared';
+    if (!audit.github.gitInitialized) return 'error';
     return 'external_action';
   })();
 
@@ -714,14 +722,32 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
     {
       id: 'step-github-push',
       step: 8,
-      title: 'Connecter et pousser le dépôt GitHub',
+      title: 'Dépôt GitHub officiel (faiaboky21-ctrl/Djiffa-Academy-1)',
       detail: !audit
         ? auditAuthBlocked
           ? 'Audit Git en attente de reconnexion Direction (session expirée).'
-          : 'Lecture de l’état du dépôt Git local et du remote GitHub en attente...'
+          : 'Lecture de l’état GitHub et du déploiement en attente...'
         : audit.github.remoteOriginConfigured
-        ? `Dépôt distant connecté (${audit.github.remoteOriginUrl || 'origin'}) sur la branche ${audit.github.branch || 'main'}.`
-        : `Dépôt Git local initialisé (${audit.github.branch || 'main'} · commit ${audit.github.headCommitShort || 'prêt'}). Reste à lier le remote GitHub et faire git push.`,
+        ? `Dépôt distant connecté (${audit.github.remoteOriginUrl || officialGithubUrl})${
+            audit.github.branch ? ` · branche ${audit.github.branch}` : ''
+          }${audit.github.headCommitShort ? ` · commit ${audit.github.headCommitShort}` : ''}.`
+        : audit.github.source === 'render'
+        ? `Déploiement Render actif${
+            audit.github.branch ? ` (branche ${audit.github.branch}` : ''
+          }${
+            audit.github.headCommitShort
+              ? `${audit.github.branch ? ' · ' : ' ('}commit ${audit.github.headCommitShort}`
+              : ''
+          }${audit.github.branch || audit.github.headCommitShort ? ')' : ''}. Dépôt de référence : ${officialGithubUrl}.`
+        : audit.github.source === 'ai-studio'
+        ? `Aperçu Google AI Studio (sans .git local). La synchronisation vers ${officialGithubUrl} est gérée depuis l’interface Google AI Studio.`
+        : audit.github.gitInitialized
+        ? `Dépôt Git local initialisé${
+            audit.github.branch ? ` (${audit.github.branch}` : ''
+          }${audit.github.headCommitShort ? ` · commit ${audit.github.headCommitShort}` : ''}${
+            audit.github.branch ? ')' : ''
+          }. Reste à lier le dépôt ${officialGithubUrl}.`
+        : `Aucun dépôt Git local détecté. Dépôt de référence : ${officialGithubUrl}.`,
       status: githubStatus
     },
     {
@@ -1138,13 +1164,21 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
 
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
-                <span className="text-zinc-400 block text-[11px]">Dépôt Git local</span>
+                <span className="text-zinc-400 block text-[11px]">
+                  {audit?.github.source === 'render'
+                    ? 'Build / Déploiement'
+                    : audit?.github.source === 'ai-studio'
+                    ? 'Environnement actif'
+                    : 'Dépôt Git local'}
+                </span>
                 <strong
                   className={
                     !audit
                       ? 'text-zinc-300'
                       : audit.github.gitInitialized
                       ? 'text-emerald-400'
+                      : audit.github.source === 'ai-studio'
+                      ? 'text-sky-300'
                       : 'text-red-400'
                   }
                 >
@@ -1153,18 +1187,28 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
                       ? 'Session Direction requise'
                       : 'Audit en cours...'
                     : audit.github.gitInitialized
-                    ? `✓ Branche ${audit.github.branch || 'main'} (${audit.github.headCommitShort || 'init'})`
+                    ? [
+                        '✓',
+                        audit.github.branch ? `Branche ${audit.github.branch}` : 'Dépôt détecté',
+                        audit.github.headCommitShort ? `(${audit.github.headCommitShort})` : ''
+                      ]
+                        .filter(Boolean)
+                        .join(' ')
+                    : audit.github.source === 'ai-studio'
+                    ? 'Aperçu Google AI Studio'
                     : 'Non initialisé'}
                 </strong>
               </div>
               <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
-                <span className="text-zinc-400 block text-[11px]">Dépôt distant GitHub (origin)</span>
+                <span className="text-zinc-400 block text-[11px]">Dépôt GitHub (référence)</span>
                 <strong
                   className={
                     !audit
                       ? 'text-zinc-300'
                       : audit.github.remoteOriginConfigured
                       ? 'text-emerald-400'
+                      : audit.github.source === 'ai-studio' || audit.github.source === 'render'
+                      ? 'text-sky-300'
                       : 'text-[#F3E5AB]'
                   }
                 >
@@ -1174,6 +1218,10 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
                       : 'Audit en cours...'
                     : audit.github.remoteOriginConfigured
                     ? '✓ Connecté'
+                    : audit.github.source === 'render'
+                    ? 'Source Render active'
+                    : audit.github.source === 'ai-studio'
+                    ? 'Sync via AI Studio UI'
                     : 'À lier manuellement'}
                 </strong>
               </div>
@@ -1181,27 +1229,27 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
 
             <div className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800 text-xs space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <strong className="text-[#F3E5AB]">Commandes pour sauvegarder sur votre compte GitHub :</strong>
+                <strong className="text-[#F3E5AB]">Dépôt GitHub officiel conservé :</strong>
                 <button
                   type="button"
-                  onClick={() =>
-                    copyText(
-                      'git-cmd',
-                      'git remote add origin https://github.com/VOTRE-COMPTE/djiffa-academy.git && git push -u origin main'
-                    )
-                  }
+                  onClick={() => copyText('git-cmd', audit?.github.remoteOriginUrl || officialGithubUrl)}
                   className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] flex items-center gap-1 cursor-pointer shrink-0"
                 >
                   {copiedId === 'git-cmd' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                  <span>{copiedId === 'git-cmd' ? 'Copié' : 'Copier'}</span>
+                  <span>{copiedId === 'git-cmd' ? 'Copié' : 'Copier URL'}</span>
                 </button>
               </div>
-              <pre className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-300 overflow-x-auto">
-{`git remote add origin https://github.com/VOTRE-COMPTE/djiffa-academy.git
-git push -u origin main`}
-              </pre>
-              <p className="text-[11px] text-zinc-400">
-                Documentation complète prête dans <code className="text-zinc-200">README.md</code> et <code className="text-zinc-200">DEPLOYMENT.md</code>.
+              <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-300 font-mono break-all">
+                {audit?.github.remoteOriginUrl || officialGithubUrl}
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                {audit?.github.source === 'ai-studio'
+                  ? 'Dans l’aperçu Google AI Studio, aucun dossier .git local n’est monté ; la sauvegarde s’effectue via l’icône GitHub de Google AI Studio vers ce dépôt existant.'
+                  : audit?.github.source === 'render'
+                  ? audit.github.remoteOriginConfigured
+                    ? 'Dépôt détecté automatiquement depuis les métadonnées Render.'
+                    : 'Instance Render active. Si les métadonnées Git Render ne sont pas exposées dans le conteneur, vérifiez la liaison dans le tableau de bord Render.'
+                  : 'Documentation complète dans README.md et DEPLOYMENT.md.'}
               </p>
             </div>
           </div>
@@ -1218,12 +1266,12 @@ git push -u origin main`}
                 : '⚠ À vérifier'}
             </span>
             <a
-              href="https://github.com/new"
+              href={audit?.github.remoteOriginUrl || officialGithubUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-[#D4AF37] hover:underline font-semibold"
             >
-              <span>Créer le dépôt sur GitHub</span>
+              <span>Ouvrir le dépôt GitHub officiel</span>
               <ExternalLink className="w-3 h-3" />
             </a>
           </div>

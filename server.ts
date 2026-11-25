@@ -2436,24 +2436,69 @@ async function startServer() {
       }
     };
 
-    // Inspect local Git repository state safely via fs (no shell execution)
-    const gitInitialized = hasFile('.git/HEAD');
+    // Inspect local Git / Render / AI Studio runtime state safely (never fabricates repo/branch/commit)
+    const officialRepoUrl = 'https://github.com/faiaboky21-ctrl/Djiffa-Academy-1';
+    const hasGitHead = hasFile('.git/HEAD');
     const gitHeadRaw = readTextSafe('.git/HEAD').trim();
     const branchMatch = gitHeadRaw.match(/^ref:\s*refs\/heads\/(.+)$/);
-    const branch = branchMatch ? branchMatch[1] : gitHeadRaw ? 'detached' : null;
-    const headRefPath = branch && branch !== 'detached' ? `.git/refs/heads/${branch}` : null;
-    const headCommitRaw = headRefPath ? readTextSafe(headRefPath).trim() : '';
-    const headCommitShort = headCommitRaw ? headCommitRaw.slice(0, 7) : null;
+    const localBranch = branchMatch ? branchMatch[1] : gitHeadRaw ? 'detached' : null;
+    const headRefPath = localBranch && localBranch !== 'detached' ? `.git/refs/heads/${localBranch}` : null;
+    const refCommitRaw = headRefPath ? readTextSafe(headRefPath).trim() : '';
+    const detachedCommitRaw =
+      localBranch === 'detached' && /^[0-9a-f]{7,40}$/i.test(gitHeadRaw) ? gitHeadRaw : '';
+
     const gitConfigRaw = readTextSafe('.git/config');
-    const remoteOriginConfigured = /\[remote "origin"\]/.test(gitConfigRaw);
-    let remoteOriginUrl: string | null = null;
-    if (remoteOriginConfigured) {
+    const localRemoteConfigured = /\[remote "origin"\]/.test(gitConfigRaw);
+    let localRemoteUrl: string | null = null;
+    if (localRemoteConfigured) {
       const urlMatch = gitConfigRaw.match(/\[remote "origin"\][\s\S]*?url\s*=\s*(.+)/);
       if (urlMatch?.[1]) {
         // Strip any embedded credentials if present
-        remoteOriginUrl = urlMatch[1].trim().replace(/\/\/[^@]+@/, '//');
+        localRemoteUrl = urlMatch[1].trim().replace(/\/\/[^@]+@/, '//');
       }
     }
+
+    const renderRepoSlug = (process.env.RENDER_GIT_REPO_SLUG || '').trim() || null;
+    const renderBranch = (process.env.RENDER_GIT_BRANCH || '').trim() || null;
+    const renderCommitRaw = (process.env.RENDER_GIT_COMMIT || '').trim() || null;
+    const isRenderRuntime = Boolean(
+      process.env.RENDER === 'true' ||
+        process.env.RENDER_SERVICE_ID ||
+        process.env.RENDER_EXTERNAL_URL ||
+        renderRepoSlug ||
+        renderBranch ||
+        renderCommitRaw
+    );
+    const isAiStudioRuntime = Boolean(
+      !isRenderRuntime &&
+        !hasGitHead &&
+        (process.env.K_SERVICE ||
+          process.env.K_REVISION ||
+          (process.env.APP_URL || '').includes('.run.app'))
+    );
+
+    const renderRepoUrl = renderRepoSlug
+      ? renderRepoSlug.startsWith('http')
+        ? renderRepoSlug
+        : `https://github.com/${renderRepoSlug}`
+      : null;
+
+    const branch = renderBranch || localBranch;
+    const effectiveCommitRaw = renderCommitRaw || refCommitRaw || detachedCommitRaw;
+    const headCommitShort =
+      effectiveCommitRaw && /^[0-9a-f]{7,40}$/i.test(effectiveCommitRaw)
+        ? effectiveCommitRaw.slice(0, 7)
+        : null;
+    const remoteOriginUrl = localRemoteUrl || renderRepoUrl;
+    const remoteOriginConfigured = Boolean(localRemoteConfigured || renderRepoUrl);
+    const gitInitialized = Boolean(hasGitHead || renderRepoUrl || renderCommitRaw);
+    const githubSource: 'render' | 'local-git' | 'ai-studio' | 'none' = isRenderRuntime
+      ? 'render'
+      : hasGitHead
+      ? 'local-git'
+      : isAiStudioRuntime
+      ? 'ai-studio'
+      : 'none';
 
     const gitignoreRaw = readTextSafe('.gitignore');
     const gitignoreProtectsEnv = /(^|\n)\.env(\s|$)/.test(gitignoreRaw);
@@ -2516,6 +2561,8 @@ async function startServer() {
         headCommitShort,
         remoteOriginConfigured,
         remoteOriginUrl,
+        officialRepoUrl,
+        source: githubSource,
         gitignoreProtectsEnv,
         readmeReady: hasFile('README.md'),
         deploymentGuideReady: hasFile('DEPLOYMENT.md')

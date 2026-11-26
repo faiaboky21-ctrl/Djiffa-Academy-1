@@ -90,6 +90,9 @@ interface AppContextType {
   coachingRequests: CoachingRequest[];
   contactMessages: ContactMessage[];
   paymentEvents: PaymentEventLog[];
+  paymentEventsError: string | null;
+  paymentEventsAuthBlocked: boolean;
+  paymentEventsNotice: string | null;
   paymentConfig: PaymentGatewayConfig;
   infraStatus: InfrastructureStatus | null;
   adminToken: string | null;
@@ -490,6 +493,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [paymentEvents, setPaymentEvents] = useState<PaymentEventLog[]>([]);
+  const [paymentEventsError, setPaymentEventsError] = useState<string | null>(null);
+  const [paymentEventsAuthBlocked, setPaymentEventsAuthBlocked] = useState(false);
+  const [paymentEventsNotice, setPaymentEventsNotice] = useState<string | null>(null);
 
   const [paymentConfig, setPaymentConfig] = useState<PaymentGatewayConfig>(DEFAULT_PAYMENT_CONFIG);
 
@@ -1000,7 +1006,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const refreshAdminTelemetry = useCallback(async () => {
     const supabaseToken = await getSupabaseAccessToken();
-    if (!adminToken && !supabaseToken) return;
+    if (!adminToken && !supabaseToken) {
+      setPaymentEventsError(
+        'Session Direction non authentifiée côté serveur. Reconnectez-vous à l’Espace Direction pour charger le journal.'
+      );
+      setPaymentEventsAuthBlocked(true);
+      return;
+    }
     const headers: Record<string, string> = {};
     if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
     if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
@@ -1011,10 +1023,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fetch('/api/admin/contact-messages', { headers })
       ]);
 
-      if (eventsRes.ok) {
+      if (eventsRes.status === 401 || eventsRes.status === 403) {
+        setPaymentEventsError(
+          `Accès refusé ou session Direction expirée (HTTP ${eventsRes.status}). Reconnectez-vous à l’Espace Direction pour consulter le journal.`
+        );
+        setPaymentEventsAuthBlocked(true);
+      } else if (!eventsRes.ok) {
+        let serverErr = '';
+        try {
+          const errBody = await eventsRes.json();
+          if (typeof errBody?.error === 'string') serverErr = errBody.error;
+        } catch {
+          // ignore parse error
+        }
+        setPaymentEventsError(
+          serverErr || `Impossible de charger le journal des paiements (HTTP ${eventsRes.status}).`
+        );
+        setPaymentEventsAuthBlocked(false);
+      } else {
         const eventsData = await eventsRes.json();
         if (eventsData.ok && Array.isArray(eventsData.events)) {
           setPaymentEvents(eventsData.events);
+          setPaymentEventsError(null);
+          setPaymentEventsAuthBlocked(false);
+          if (eventsData.migrationRequired) {
+            setPaymentEventsNotice(
+              'Persistance Supabase prête à être activée : exécutez supabase/migrations_payment_events_v3.sql dans Supabase SQL Editor pour conserver les événements après redémarrage Render.'
+            );
+          } else {
+            setPaymentEventsNotice(null);
+          }
+        } else {
+          setPaymentEventsError(eventsData?.error || 'Réponse invalide lors du chargement du journal.');
+          setPaymentEventsAuthBlocked(false);
         }
       }
 
@@ -1043,6 +1084,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     } catch (err) {
       console.warn('Admin telemetry refresh warning:', err);
+      setPaymentEventsError('Erreur réseau lors du chargement du journal des paiements.');
+      setPaymentEventsAuthBlocked(false);
     }
   }, [adminToken]);
 
@@ -2338,6 +2381,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         coachingRequests,
         contactMessages,
         paymentEvents,
+        paymentEventsError,
+        paymentEventsAuthBlocked,
+        paymentEventsNotice,
         paymentConfig,
         infraStatus,
         adminToken,

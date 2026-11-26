@@ -42,6 +42,7 @@ interface ServerPaymentEvent {
   id: string;
   reference: string;
   provider: string;
+  mode: 'sandbox' | 'live';
   event: string;
   status: string;
   detail: string;
@@ -62,14 +63,55 @@ interface ServerContactMessage {
 
 const recentPaymentEvents: ServerPaymentEvent[] = [];
 const recentContactMessages: ServerContactMessage[] = [];
+let lastInvalidWebhookLogAt = 0;
 
-function recordPaymentEvent(entry: Omit<ServerPaymentEvent, 'id' | 'receivedAt'>) {
-  recentPaymentEvents.unshift({
-    id: `pevt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    ...entry,
+function getEffectiveServerPaymentMode(): 'sandbox' | 'live' {
+  return (process.env.PAYMENT_MODE || 'sandbox').trim().toLowerCase() === 'live' ? 'live' : 'sandbox';
+}
+
+function recordPaymentEvent(entry: Omit<ServerPaymentEvent, 'id' | 'receivedAt' | 'mode'>) {
+  const mode = getEffectiveServerPaymentMode();
+  const safeReference = String(entry.reference || 'N/A').trim().slice(0, 120) || 'N/A';
+  const safeProvider = String(entry.provider || 'fedapay').trim().slice(0, 40) || 'fedapay';
+  const safeEvent = String(entry.event || 'event').trim().slice(0, 80) || 'event';
+  const safeStatus = String(entry.status || 'info').trim().slice(0, 40) || 'info';
+  const safeDetail = String(entry.detail || '').trim().slice(0, 500);
+
+  const record: ServerPaymentEvent = {
+    id: `pevt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    reference: safeReference,
+    provider: safeProvider,
+    mode,
+    event: safeEvent,
+    status: safeStatus,
+    detail: safeDetail,
     receivedAt: new Date().toISOString()
-  });
+  };
+
+  recentPaymentEvents.unshift(record);
   if (recentPaymentEvents.length > 50) recentPaymentEvents.length = 50;
+
+  if (supabaseAdmin) {
+    void (async () => {
+      try {
+        const { error } = await supabaseAdmin.from('payment_events').insert({
+          id: record.id,
+          reference: record.reference,
+          provider: record.provider,
+          mode: record.mode,
+          event: record.event,
+          status: record.status,
+          detail: record.detail,
+          received_at: record.receivedAt
+        });
+        if (error && !/does not exist|schema cache|PGRST205/i.test(error.message)) {
+          console.warn('Payment event persistence warning:', error.message);
+        }
+      } catch {
+        // Never disrupt payment flows if event logging fails
+      }
+    })();
+  }
 }
 
 // Server-side Supabase Admin client (NEVER exposed to browser)
@@ -1192,7 +1234,60 @@ async function startServer() {
       res.status(403).json({ ok: false, error: 'Accès réservé à la Direction.' });
       return;
     }
-    res.json({ ok: true, events: recentPaymentEvents });
+
+    if (!supabaseAdmin) {
+      res.json({ ok: true, events: recentPaymentEvents, persistent: false, migrationRequired: false });
+      return;
+    }
+
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('payment_events')
+        .select('id, reference, provider, mode, event, status, detail, received_at')
+        .order('received_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        const missingTable = /does not exist|schema cache|PGRST205/i.test(error.message);
+        if (missingTable) {
+          res.json({
+            ok: true,
+            events: recentPaymentEvents,
+            persistent: false,
+            migrationRequired: true
+          });
+          return;
+        }
+        res.status(500).json({
+          ok: false,
+          error: 'Impossible de charger les événements de paiement depuis Supabase.'
+        });
+        return;
+      }
+
+      const dbEvents: ServerPaymentEvent[] = (data || []).map((row: any) => ({
+        id: String(row.id),
+        reference: String(row.reference || 'N/A'),
+        provider: String(row.provider || 'fedapay'),
+        mode: row.mode === 'live' ? 'live' : 'sandbox',
+        event: String(row.event || 'event'),
+        status: String(row.status || 'info'),
+        detail: String(row.detail || ''),
+        receivedAt: row.received_at || new Date().toISOString()
+      }));
+
+      const seenIds = new Set(dbEvents.map((e) => e.id));
+      const merged = [
+        ...dbEvents,
+        ...recentPaymentEvents.filter((e) => !seenIds.has(e.id))
+      ]
+        .sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime())
+        .slice(0, 50);
+
+      res.json({ ok: true, events: merged, persistent: true, migrationRequired: false });
+    } catch {
+      res.json({ ok: true, events: recentPaymentEvents, persistent: false, migrationRequired: false });
+    }
   });
 
   // 4. Create real payment session (FedaPay / CinetPay / KKiaPay) + record pending order in Supabase if active
@@ -1545,9 +1640,7 @@ async function startServer() {
           provider: 'fedapay',
           event: 'create_session',
           status: 'pending',
-          detail: `Session créée (${normalizedCurrency} ${verifiedAmount}${fedaTxId ? `, Tx ${fedaTxId}` : ''}${
-            normalizedPhone ? `, ${normalizedPhone.number}` : ''
-          })`
+          detail: `Session créée (${normalizedCurrency} ${verifiedAmount}${fedaTxId ? `, Tx ${fedaTxId}` : ''})`
         });
 
         res.json({
@@ -1612,6 +1705,13 @@ async function startServer() {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur serveur lors de l’initialisation du paiement.';
+      recordPaymentEvent({
+        reference: 'SESSION-INIT',
+        provider: status.provider,
+        event: 'create_session_error',
+        status: 'failed',
+        detail: message
+      });
       res.status(500).json({ ok: false, error: message });
     }
   });
@@ -1778,6 +1878,13 @@ async function startServer() {
 
         const fedaRes = await fetchFedaPayTransaction(resolvedTxId, status.mode);
         if (!fedaRes.ok) {
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'verify_error',
+            status: storedOrderStatus || 'pending',
+            detail: `Contrôle FedaPay indisponible : ${fedaRes.error}`
+          });
           // Condition 7: never declare a payment failed because a temporary verification call failed
           res.status(fedaRes.temporary ? 503 : 502).json({
             ok: false,
@@ -1950,6 +2057,22 @@ async function startServer() {
 
         // Still pending / processing / unknown non-final state -> keep pending (never unlock, never force failed)
         await syncNonConfirmedOrderStatusInSupabase(cleanRef, 'pending', resolvedTxId);
+        const latestSamePending = recentPaymentEvents.find(
+          (e) =>
+            e.reference === cleanRef &&
+            e.event === 'verify' &&
+            e.status === 'pending' &&
+            Date.now() - new Date(e.receivedAt).getTime() < 30_000
+        );
+        if (!latestSamePending) {
+          recordPaymentEvent({
+            reference: cleanRef,
+            provider: 'fedapay',
+            event: 'verify',
+            status: 'pending',
+            detail: `Transaction ${resolvedTxId} en attente (${txStatus || 'pending'})`
+          });
+        }
         const failureHint = extractFedaPayFailureReason(tx);
         const pendingModeLabel = tx.mode || tx.payment_method;
         const pendingModeSuffix = pendingModeLabel ? ` [mode: ${pendingModeLabel}]` : '';
@@ -2084,6 +2207,16 @@ async function startServer() {
       } else {
         const sig = req.headers['x-fedapay-signature'] as string | undefined;
         if (!sig) {
+          if (Date.now() - lastInvalidWebhookLogAt > 10_000) {
+            lastInvalidWebhookLogAt = Date.now();
+            recordPaymentEvent({
+              reference: 'WEBHOOK-SECURITY',
+              provider: 'fedapay',
+              event: 'webhook_invalid_signature',
+              status: 'rejected',
+              detail: 'Webhook FedaPay rejeté : en-tête de signature absent.'
+            });
+          }
           res.status(401).json({ ok: false, error: 'Signature webhook FedaPay manquante.' });
           return;
         }
@@ -2099,6 +2232,16 @@ async function startServer() {
           (expectedTimestamped !== '' &&
             safeConstantTimeEqual(providedHex.toLowerCase(), expectedTimestamped.toLowerCase()));
         if (!sigValid) {
+          if (Date.now() - lastInvalidWebhookLogAt > 10_000) {
+            lastInvalidWebhookLogAt = Date.now();
+            recordPaymentEvent({
+              reference: 'WEBHOOK-SECURITY',
+              provider: 'fedapay',
+              event: 'webhook_invalid_signature',
+              status: 'rejected',
+              detail: 'Webhook FedaPay rejeté : signature cryptographique invalide.'
+            });
+          }
           res.status(403).json({ ok: false, error: 'Signature webhook FedaPay invalide.' });
           return;
         }

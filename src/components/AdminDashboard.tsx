@@ -80,6 +80,9 @@ export const AdminDashboard: React.FC = () => {
     coachingRequests,
     contactMessages,
     paymentEvents,
+    paymentEventsError,
+    paymentEventsAuthBlocked,
+    paymentEventsNotice,
     paymentConfig,
     infraStatus,
     adminToken,
@@ -1661,36 +1664,72 @@ export const AdminDashboard: React.FC = () => {
                 </button>
               </div>
 
-              {paymentEvents.length === 0 ? (
-                <p className="text-xs text-zinc-400">
-                  Aucun événement serveur récent (sessions créées, vérifications, webhooks ou remboursements) depuis le démarrage du serveur.
-                </p>
-              ) : (
-                <div className="space-y-2.5">
-                  {paymentEvents.map((evt) => (
-                    <div
-                      key={evt.id}
-                      className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+              {paymentEventsError && (
+                <div className="p-3.5 rounded-xl bg-red-950/50 border border-red-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-red-200">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <span>{paymentEventsError}</span>
+                  </div>
+                  {paymentEventsAuthBlocked && (
+                    <button
+                      type="button"
+                      onClick={() => openAuthModal('admin')}
+                      className="px-3 py-1.5 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-[11px] shrink-0 cursor-pointer"
                     >
-                      <div className="space-y-0.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-mono font-bold text-[#F3E5AB]">{evt.reference || 'N/A'}</span>
-                          <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
-                            {evt.provider} · {evt.event}
-                          </span>
-                          <span className="text-[10px] uppercase text-[#D4AF37] font-semibold">
-                            {evt.status}
-                          </span>
-                        </div>
-                        <p className="text-zinc-300">{evt.detail}</p>
-                      </div>
-                      <span className="text-[11px] font-mono text-zinc-500 shrink-0">
-                        {new Date(evt.receivedAt).toLocaleString('fr-FR')}
-                      </span>
-                    </div>
-                  ))}
+                      Se reconnecter à la Direction
+                    </button>
+                  )}
                 </div>
               )}
+
+              {!paymentEventsError && paymentEventsNotice && (
+                <div className="p-3 rounded-xl bg-amber-950/30 border border-[#D4AF37]/40 text-[11px] text-[#F3E5AB]">
+                  {paymentEventsNotice}
+                </div>
+              )}
+
+              {!paymentEventsError && paymentEvents.length === 0 ? (
+                <p className="text-xs text-zinc-400">
+                  Aucun événement de paiement ou webhook enregistré pour le moment.
+                </p>
+              ) : paymentEvents.length > 0 ? (
+                <div className="space-y-2.5">
+                  {paymentEvents.map((evt) => {
+                    const isLiveMode = evt.mode === 'live';
+                    return (
+                      <div
+                        key={evt.id}
+                        className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-bold text-[#F3E5AB]">{evt.reference || 'N/A'}</span>
+                            <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                              {evt.provider} · {evt.event}
+                            </span>
+                            <span
+                              className={`text-[10px] uppercase px-2 py-0.5 rounded border font-bold ${
+                                isLiveMode
+                                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60'
+                                  : 'bg-amber-950/70 text-[#F3E5AB] border-[#D4AF37]/40'
+                              }`}
+                            >
+                              {isLiveMode ? 'Live' : 'Sandbox'}
+                            </span>
+                            <span className="text-[10px] uppercase text-[#D4AF37] font-semibold">
+                              {evt.status}
+                            </span>
+                          </div>
+                          <p className="text-zinc-300">{evt.detail}</p>
+                        </div>
+                        <span className="text-[11px] font-mono text-zinc-500 shrink-0">
+                          {new Date(evt.receivedAt).toLocaleString('fr-FR')}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           </div>
         )}

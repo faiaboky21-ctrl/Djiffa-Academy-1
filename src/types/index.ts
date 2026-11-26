@@ -246,6 +246,7 @@ export interface PaymentEventLog {
   id: string;
   reference: string;
   provider: string;
+  mode?: 'sandbox' | 'live';
   event: string;
   status: string;
   detail: string;

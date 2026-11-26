@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="60%">
+      <stop offset="0%" stop-color="#1A1710" />
+      <stop offset="65%" stop-color="#0D0D10" />
+      <stop offset="100%" stop-color="#08080A" />
+    </radialGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F3E5AB" />
+      <stop offset="48%" stop-color="#D4AF37" />
+      <stop offset="100%" stop-color="#9A781A" />
+    </linearGradient>
+    <linearGradient id="goldRim" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F3E5AB" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#D4AF37" stop-opacity="0.65" />
+      <stop offset="100%" stop-color="#8C701E" stop-opacity="0.45" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bgGlow)" />
+  <rect x="24" y="24" width="464" height="464" rx="76" fill="none" stroke="url(#goldRim)" stroke-width="6" />
+  <rect x="42" y="42" width="428" height="428" rx="60" fill="none" stroke="#D4AF37" stroke-opacity="0.22" stroke-width="2" />
+  <!-- Geometric Editorial D Crest -->
+  <path
+    d="M158 134 H268 C346 134 390 184 390 256 C390 328 346 378 268 378 H158 V134 Z
+       M206 176 V336 H266 C318 336 342 304 342 256 C342 208 318 176 266 176 H206 Z"
+    fill="url(#goldGrad)"
+    fill-rule="evenodd"
+  />
+  <!-- Top & bottom serif bars -->
+  <rect x="138" y="134" width="68" height="16" rx="4" fill="url(#goldGrad)" />
+  <rect x="138" y="362" width="68" height="16" rx="4" fill="url(#goldGrad)" />
+  <!-- Subtle Academy accent diamond -->
+  <polygon points="256,80 264,92 256,104 248,92" fill="#F3E5AB" opacity="0.9" />
+</svg>

@@ -318,6 +318,26 @@ const DEFAULT_PAYMENT_CONFIG: PaymentGatewayConfig = {
   cardsActive: true
 };
 
+const VALID_APP_VIEWS: AppView[] = [
+  'home',
+  'catalog',
+  'course-detail',
+  'player',
+  'student-space',
+  'admin-space',
+  'coaching',
+  'about',
+  'contact',
+  'legal-cgv',
+  'legal-mentions'
+];
+
+interface NavigationHistoryState {
+  djiffaView: AppView;
+  selectedCourseId: string | null;
+  activeLessonId: string | null;
+}
+
 const isUuid = (val?: string | null): boolean => Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -1299,7 +1319,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!paymentRef) return;
     const txId = params.get('id') || params.get('transaction_id') || undefined;
 
-    window.history.replaceState({}, '', window.location.pathname);
+    window.history.replaceState(
+      {
+        djiffaView: 'home',
+        selectedCourseId: null,
+        activeLessonId: null
+      } satisfies NavigationHistoryState,
+      '',
+      window.location.pathname || '/'
+    );
 
     (async () => {
       const result = await verifyExistingPayment(paymentRef, txId);
@@ -1448,10 +1476,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser]);
 
+  // Safe Android Back / browser popstate navigation support (preserves ?payment_ref=... on mount)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hasPaymentRef = params.has('payment_ref');
+    const existingState = window.history.state as Partial<NavigationHistoryState> | null;
+
+    if (!hasPaymentRef) {
+      if (existingState?.djiffaView && VALID_APP_VIEWS.includes(existingState.djiffaView)) {
+        const restoredCourseId =
+          typeof existingState.selectedCourseId === 'string' ? existingState.selectedCourseId : null;
+        const restoredLessonId =
+          typeof existingState.activeLessonId === 'string' ? existingState.activeLessonId : null;
+        const safeView: AppView =
+          (existingState.djiffaView === 'course-detail' || existingState.djiffaView === 'player') &&
+          !restoredCourseId
+            ? 'home'
+            : existingState.djiffaView;
+        setActiveView(safeView);
+        setSelectedCourseId(restoredCourseId);
+        setActiveLessonId(restoredLessonId);
+      } else {
+        const rawHash = window.location.hash.replace(/^#/, '') as AppView;
+        const hashView: AppView =
+          VALID_APP_VIEWS.includes(rawHash) && rawHash !== 'course-detail' && rawHash !== 'player'
+            ? rawHash
+            : 'home';
+        if (hashView !== 'home') {
+          setActiveView(hashView);
+        }
+        try {
+          window.history.replaceState(
+            {
+              djiffaView: hashView,
+              selectedCourseId: null,
+              activeLessonId: null
+            } satisfies NavigationHistoryState,
+            '',
+            `${window.location.pathname || '/'}${window.location.search}${hashView === 'home' ? '' : `#${hashView}`}`
+          );
+        } catch {
+          // Ignore replaceState errors in restricted contexts
+        }
+      }
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state as Partial<NavigationHistoryState> | null;
+      const targetView: AppView =
+        state?.djiffaView && VALID_APP_VIEWS.includes(state.djiffaView) ? state.djiffaView : 'home';
+      const targetCourseId = typeof state?.selectedCourseId === 'string' ? state.selectedCourseId : null;
+      const targetLessonId = typeof state?.activeLessonId === 'string' ? state.activeLessonId : null;
+      const safeView: AppView =
+        (targetView === 'course-detail' || targetView === 'player') && !targetCourseId
+          ? 'home'
+          : targetView;
+
+      setActiveView(safeView);
+      setSelectedCourseId(targetCourseId);
+      setActiveLessonId(targetLessonId);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
   const navigateTo = (view: AppView, courseId?: string, lessonId?: string) => {
+    const nextCourseId = courseId !== undefined ? courseId : selectedCourseId;
+    const nextLessonId = lessonId !== undefined ? lessonId : activeLessonId;
+
+    if (view === activeView && nextCourseId === selectedCourseId && nextLessonId === activeLessonId) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
     setActiveView(view);
     if (courseId !== undefined) setSelectedCourseId(courseId);
     if (lessonId !== undefined) setActiveLessonId(lessonId);
+
+    try {
+      const basePath = window.location.pathname || '/';
+      const hash = view === 'home' ? '' : `#${view}`;
+      window.history.pushState(
+        {
+          djiffaView: view,
+          selectedCourseId: nextCourseId,
+          activeLessonId: nextLessonId
+        } satisfies NavigationHistoryState,
+        '',
+        `${basePath}${hash}`
+      );
+    } catch {
+      // Ignore history push errors in restricted contexts
+    }
+
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 

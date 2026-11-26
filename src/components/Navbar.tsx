@@ -19,6 +19,7 @@ import {
   Bell
 } from 'lucide-react';
 import { Currency, User } from '../types';
+import { PWAInstallButton } from './PWAInstallButton';
 
 function getSafeHeaderDisplayName(user: User): string {
   const rawName = (user.name || '').trim();
@@ -136,9 +137,10 @@ export const Navbar: React.FC = () => {
           })}
         </nav>
 
-        {/* Zone 3: Currency + Primary Account Action */}
+        {/* Zone 3: Install PWA + Currency + Primary Account Action */}
         <div className="flex items-center gap-3 shrink-0">
-          
+          <PWAInstallButton variant="compact" />
+
           {/* Currency Switcher */}
           <div className="relative">
             <button
@@ -358,6 +360,10 @@ export const Navbar: React.FC = () => {
                 Mon Espace Apprenant
               </button>
             )}
+            <PWAInstallButton
+              variant="drawer"
+              onAfterAction={() => setMobileMenuOpen(false)}
+            />
           </div>
         </div>
       )}

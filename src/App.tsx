@@ -26,6 +26,7 @@ import { Course } from './types';
 import { getCoursePricing } from './lib/pricing';
 import { BRAND_IMAGES } from './lib/assets';
 import { ArrowRight, ArrowLeft, Sparkles, CheckCircle, AlertCircle, MessageSquareQuote, X, Info, Scale } from 'lucide-react';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -55,6 +56,7 @@ const MainAppContent: React.FC = () => {
   if (activeView === 'player' && selectedCourseId) {
     return (
       <div className="min-h-screen bg-[#08080A] text-slate-100 flex flex-col">
+        <OfflineIndicator />
         <CoursePlayer
           courseId={selectedCourseId}
           initialLessonId={activeLessonId}
@@ -74,6 +76,7 @@ const MainAppContent: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#08080A] text-slate-100 flex flex-col font-sans selection:bg-[#D4AF37]/30 selection:text-[#F3E5AB]">
       <Navbar />
+      <OfflineIndicator />
 
       {paymentReturnNotice && (
         <div

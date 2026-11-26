@@ -5,7 +5,7 @@
  *  - Seamlessly upgrades to Supabase Auth + PostgreSQL + Storage + FedaPay/KKiaPay/CinetPay when configured
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Course,
   User,
@@ -66,6 +66,7 @@ export interface InfrastructureStatus {
   adminSecurity: {
     email: string;
     customCodeConfigured: boolean;
+    sessionSecretConfigured?: boolean;
     isProductionMode?: boolean;
   };
   environment: string;
@@ -96,6 +97,7 @@ interface AppContextType {
   paymentConfig: PaymentGatewayConfig;
   infraStatus: InfrastructureStatus | null;
   adminToken: string | null;
+  adminDataLoading: boolean;
   adminSessionExpiredNotice: string | null;
   supabaseReady: boolean;
   paymentReturnNotice: { type: 'success' | 'pending' | 'error'; message: string } | null;
@@ -496,6 +498,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [paymentEventsError, setPaymentEventsError] = useState<string | null>(null);
   const [paymentEventsAuthBlocked, setPaymentEventsAuthBlocked] = useState(false);
   const [paymentEventsNotice, setPaymentEventsNotice] = useState<string | null>(null);
+  const [adminDataLoading, setAdminDataLoading] = useState(false);
+  const adminDataFetchInFlightRef = useRef(false);
 
   const [paymentConfig, setPaymentConfig] = useState<PaymentGatewayConfig>(DEFAULT_PAYMENT_CONFIG);
 
@@ -576,40 +580,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (courseRows && courseRows.length > 0) {
         // Also try loading unlocked private contents for enrolled/admin users
         const { data: privRows } = await supabase.from('course_private_contents').select('*');
-        const privMap = new Map<string, any[]>();
+        const privModulesMap = new Map<string, any[]>();
+        const privQuizMap = new Map<string, any[]>();
         (privRows || []).forEach((pr: any) => {
-          privMap.set(pr.course_id, pr.modules_payload || []);
+          if (Array.isArray(pr.modules_payload) && pr.modules_payload.length > 0) {
+            privModulesMap.set(pr.course_id, pr.modules_payload);
+          }
+          if (Array.isArray(pr.final_quiz) && pr.final_quiz.length > 0) {
+            privQuizMap.set(pr.course_id, pr.final_quiz);
+          }
         });
 
-        setCourses(
-          courseRows.map((c: any) => ({
-            id: c.id,
-            slug: c.slug,
-            title: c.title,
-            subtitle: c.subtitle,
-            description: c.description,
-            domain: c.domain_id,
-            level: c.level,
-            duration: c.duration,
-            modulesCount: c.modules_count,
-            lessonsCount: c.lessons_count,
-            priceXOF: c.price_xof,
-            priceEUR: c.price_eur,
-            priceUSD: c.price_usd,
-            originalPriceXOF: c.original_price_xof || undefined,
-            promoActive: Boolean(c.promo_active),
-            promoPriceXOF: c.promo_price_xof || undefined,
-            promoPriceEUR: c.promo_price_eur || undefined,
-            promoPriceUSD: c.promo_price_usd || undefined,
-            coverImage: c.cover_image,
-            isFeatured: Boolean(c.is_featured),
-            isPublished: Boolean(c.is_published),
-            certificateEligible: Boolean(c.certificate_eligible),
-            objectives: c.objectives || [],
-            skillsAcquired: c.skills_acquired || [],
-            resourcesIncluded: c.resources_included || [],
-            modules: privMap.get(c.id) || c.syllabus_modules || []
-          }))
+        setCourses((prevCourses) =>
+          courseRows.map((c: any) => {
+            const prevCourse = prevCourses.find((pc) => pc.id === c.id);
+            const seedCourse = INITIAL_COURSES.find((ic) => ic.id === c.id);
+            const cloudModules = privModulesMap.get(c.id);
+            const cloudFinalQuiz = privQuizMap.get(c.id);
+            const preservedFinalQuiz =
+              (Array.isArray(cloudFinalQuiz) && cloudFinalQuiz.length > 0 ? cloudFinalQuiz : undefined) ||
+              (Array.isArray(prevCourse?.finalQuiz) && prevCourse.finalQuiz.length > 0
+                ? prevCourse.finalQuiz
+                : undefined) ||
+              (Array.isArray(seedCourse?.finalQuiz) && seedCourse.finalQuiz.length > 0
+                ? seedCourse.finalQuiz
+                : undefined);
+
+            return {
+              id: c.id,
+              slug: c.slug,
+              title: c.title,
+              subtitle: c.subtitle,
+              description: c.description,
+              domain: c.domain_id,
+              level: c.level,
+              duration: c.duration,
+              modulesCount: c.modules_count,
+              lessonsCount: c.lessons_count,
+              priceXOF: c.price_xof,
+              priceEUR: c.price_eur,
+              priceUSD: c.price_usd,
+              originalPriceXOF: c.original_price_xof || undefined,
+              promoActive: Boolean(c.promo_active),
+              promoPriceXOF: c.promo_price_xof || undefined,
+              promoPriceEUR: c.promo_price_eur || undefined,
+              promoPriceUSD: c.promo_price_usd || undefined,
+              coverImage: c.cover_image,
+              isFeatured: Boolean(c.is_featured),
+              isPublished: Boolean(c.is_published),
+              certificateEligible: Boolean(c.certificate_eligible),
+              objectives: c.objectives || [],
+              skillsAcquired: c.skills_acquired || [],
+              resourcesIncluded: c.resources_included || [],
+              modules: cloudModules || c.syllabus_modules || [],
+              finalQuiz: preservedFinalQuiz
+            };
+          })
         );
       }
 
@@ -881,6 +907,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   const refreshSupabaseAdminData = useCallback(async () => {
+    if (adminDataFetchInFlightRef.current) return;
     if (!infraStatus?.supabase.serverConnected) return;
     const supabaseToken = await getSupabaseAccessToken();
     if (!adminToken && !supabaseToken) return;
@@ -888,6 +915,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
     if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
 
+    adminDataFetchInFlightRef.current = true;
+    setAdminDataLoading(true);
     try {
       const res = await fetch('/api/supabase/admin-data', { headers });
       if (!res.ok) return;
@@ -999,8 +1028,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }))
         );
       }
+
+      if (Array.isArray(data.coursePrivateContents) && data.coursePrivateContents.length > 0) {
+        const privMap = new Map<string, { modules?: any[]; finalQuiz?: any[] }>();
+        data.coursePrivateContents.forEach((pr: any) => {
+          if (!pr?.course_id) return;
+          privMap.set(String(pr.course_id), {
+            modules: Array.isArray(pr.modules_payload) && pr.modules_payload.length > 0 ? pr.modules_payload : undefined,
+            finalQuiz: Array.isArray(pr.final_quiz) && pr.final_quiz.length > 0 ? pr.final_quiz : undefined
+          });
+        });
+        setCourses((prev) =>
+          prev.map((c) => {
+            const priv = privMap.get(c.id);
+            if (!priv) return c;
+            return {
+              ...c,
+              modules: priv.modules || c.modules,
+              finalQuiz: priv.finalQuiz || c.finalQuiz
+            };
+          })
+        );
+      }
     } catch (err) {
       console.warn('Admin Supabase load warning:', err);
+    } finally {
+      adminDataFetchInFlightRef.current = false;
+      setAdminDataLoading(false);
     }
   }, [adminToken, infraStatus?.supabase.serverConnected]);
 
@@ -2387,6 +2441,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         paymentConfig,
         infraStatus,
         adminToken,
+        adminDataLoading,
         adminSessionExpiredNotice,
         supabaseReady: isSupabaseConfigured,
         paymentReturnNotice,

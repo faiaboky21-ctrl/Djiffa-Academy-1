@@ -24,7 +24,8 @@ const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
 // Ephemeral in-memory fallback if ADMIN_SESSION_SECRET isn't provided in env
-const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET =
+  (process.env.ADMIN_SESSION_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
 
 // Idempotency stores for verified payment references & processed webhook events
 const processedTransactions = new Map<string, { status: string; verifiedAt: string; provider: string }>();
@@ -944,6 +945,7 @@ async function startServer() {
       adminSecurity: {
         email: expectedAdminEmail,
         customCodeConfigured: customAdminPass,
+        sessionSecretConfigured: Boolean((process.env.ADMIN_SESSION_SECRET || '').trim()),
         isProductionMode: isProduction
       },
       environment: isProduction ? 'production' : 'development'
@@ -2952,13 +2954,57 @@ async function startServer() {
         }
         if (courseErr) throw new Error(`Courses: ${courseErr.message}`);
 
-        const privateRows = courses.map((c: any) => ({
+        // Preserve any existing cloud final_quiz so a partial/older payload never erases a saved final exam
+        const existingFinalQuizMap = new Map<string, any[]>();
+        let supportsFinalQuizCol = true;
+        const { data: existingPrivateRows, error: existingPrivateErr } = await supabaseAdmin
+          .from('course_private_contents')
+          .select('course_id, final_quiz');
+
+        if (existingPrivateErr && /column|schema cache|42703|PGRST204/i.test(existingPrivateErr.message)) {
+          supportsFinalQuizCol = false;
+        } else if (Array.isArray(existingPrivateRows)) {
+          existingPrivateRows.forEach((row: any) => {
+            if (row?.course_id && Array.isArray(row.final_quiz) && row.final_quiz.length > 0) {
+              existingFinalQuizMap.set(String(row.course_id), row.final_quiz);
+            }
+          });
+        }
+
+        const privateRowsCore = courses.map((c: any) => ({
           course_id: c.id,
           modules_payload: c.modules || []
         }));
-        const { error: privErr } = await supabaseAdmin
-          .from('course_private_contents')
-          .upsert(privateRows, { onConflict: 'course_id' });
+
+        const privateRowsExtended = courses.map((c: any) => {
+          const incomingQuiz =
+            Array.isArray(c.finalQuiz) && c.finalQuiz.length > 0 ? c.finalQuiz : null;
+          const preservedQuiz = incomingQuiz || existingFinalQuizMap.get(String(c.id)) || null;
+          return {
+            course_id: c.id,
+            modules_payload: c.modules || [],
+            final_quiz: preservedQuiz
+          };
+        });
+
+        let privErr: { message: string } | null = null;
+        if (supportsFinalQuizCol) {
+          const extRes = await supabaseAdmin
+            .from('course_private_contents')
+            .upsert(privateRowsExtended, { onConflict: 'course_id' });
+          privErr = extRes.error;
+          if (privErr && /column|schema cache|42703|PGRST204/i.test(privErr.message)) {
+            const fallbackPrivRes = await supabaseAdmin
+              .from('course_private_contents')
+              .upsert(privateRowsCore, { onConflict: 'course_id' });
+            privErr = fallbackPrivRes.error;
+          }
+        } else {
+          const coreRes = await supabaseAdmin
+            .from('course_private_contents')
+            .upsert(privateRowsCore, { onConflict: 'course_id' });
+          privErr = coreRes.error;
+        }
         if (privErr) throw new Error(`Private contents: ${privErr.message}`);
         counts.courses = publicRowsCore.length;
       }
@@ -3073,14 +3119,16 @@ async function startServer() {
         { data: progress },
         { data: certificates },
         { data: orders },
-        { data: coachingRequests }
+        { data: coachingRequests },
+        { data: coursePrivateContents }
       ] = await Promise.all([
         supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: false }),
         supabaseAdmin.from('enrollments').select('*'),
         supabaseAdmin.from('lesson_progress').select('*'),
         supabaseAdmin.from('certificates').select('*'),
         supabaseAdmin.from('orders').select('*').order('created_at', { ascending: false }),
-        supabaseAdmin.from('coaching_requests').select('*').order('created_at', { ascending: false })
+        supabaseAdmin.from('coaching_requests').select('*').order('created_at', { ascending: false }),
+        supabaseAdmin.from('course_private_contents').select('*')
       ]);
 
       res.json({
@@ -3090,7 +3138,8 @@ async function startServer() {
         progress: progress || [],
         certificates: certificates || [],
         orders: orders || [],
-        coachingRequests: coachingRequests || []
+        coachingRequests: coachingRequests || [],
+        coursePrivateContents: coursePrivateContents || []
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'Erreur chargement Supabase.' });

@@ -5,9 +5,9 @@
  * orders, promo codes, coaching, contact messages, payments/webhooks, brand/site identity, legal texts, testimonials & Launch Center
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { Course, CourseModule, Lesson, ContactMessage } from '../types';
+import { Course, CourseModule, Lesson, ContactMessage, QuizQuestion } from '../types';
 import { getCoursePricing } from '../lib/pricing';
 import { BRAND_IMAGES, resolveAssetImageUrl } from '../lib/assets';
 import { getSupabaseAccessToken } from '../lib/supabase';
@@ -86,6 +86,7 @@ export const AdminDashboard: React.FC = () => {
     paymentConfig,
     infraStatus,
     adminToken,
+    adminDataLoading,
     formatPrice,
     saveCourse,
     deleteCourse,
@@ -138,6 +139,9 @@ export const AdminDashboard: React.FC = () => {
     >
   >({});
   const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
+  const [showFinalQuizEditor, setShowFinalQuizEditor] = useState(false);
+  const lastAutoTelemetryKeyRef = useRef<string | null>(null);
+  const lastAutoAdminDataKeyRef = useRef<string | null>(null);
 
   // New Domain form
   const [newDomainTitle, setNewDomainTitle] = useState('');
@@ -182,10 +186,33 @@ export const AdminDashboard: React.FC = () => {
   }, [siteSettings]);
 
   useEffect(() => {
-    if (currentUser?.role === 'admin') {
+    if (currentUser?.role !== 'admin') {
+      lastAutoTelemetryKeyRef.current = null;
+      lastAutoAdminDataKeyRef.current = null;
+      return;
+    }
+
+    const telemetryKey = `${currentUser.id}|${adminToken || ''}`;
+    if (lastAutoTelemetryKeyRef.current !== telemetryKey) {
+      lastAutoTelemetryKeyRef.current = telemetryKey;
       refreshAdminTelemetry();
     }
-  }, [currentUser?.role, refreshAdminTelemetry]);
+
+    if (infraStatus?.supabase.serverConnected) {
+      const adminDataKey = `${currentUser.id}|${adminToken || ''}|connected`;
+      if (lastAutoAdminDataKeyRef.current !== adminDataKey) {
+        lastAutoAdminDataKeyRef.current = adminDataKey;
+        refreshSupabaseAdminData();
+      }
+    }
+  }, [
+    currentUser?.id,
+    currentUser?.role,
+    adminToken,
+    infraStatus?.supabase.serverConnected,
+    refreshAdminTelemetry,
+    refreshSupabaseAdminData
+  ]);
 
   // Strict security gate
   if (!currentUser || currentUser.role !== 'admin') {
@@ -528,6 +555,21 @@ export const AdminDashboard: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {infraStatus?.supabase.serverConnected && (
+              <button
+                type="button"
+                disabled={adminDataLoading}
+                onClick={() => {
+                  refreshSupabaseAdminData();
+                  refreshAdminTelemetry();
+                }}
+                title="Actualiser les données Supabase (apprenants, commandes, accompagnement)"
+                className="px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer min-h-[44px] bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${adminDataLoading ? 'animate-spin text-[#D4AF37]' : ''}`} />
+                <span>{adminDataLoading ? 'Actualisation...' : 'Actualiser'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setActiveTab('launch-center')}
@@ -800,6 +842,7 @@ export const AdminDashboard: React.FC = () => {
                           </div>
                           <p className="text-xs text-zinc-400 mt-0.5">
                             {c.modules.length} modules · {c.modules.reduce((s, m) => s + m.lessons.length, 0)} leçons · Niveau : {c.level}
+                            {c.finalQuiz && c.finalQuiz.length > 0 ? ` · Examen final (${c.finalQuiz.length} Q)` : ''}
                           </p>
                           <div className="text-xs font-mono font-bold text-[#D4AF37] mt-1 tabular-nums flex flex-wrap items-center gap-2">
                             <span>
@@ -818,6 +861,7 @@ export const AdminDashboard: React.FC = () => {
                         <button
                           onClick={() => {
                             setEditingCourse(c);
+                            setShowFinalQuizEditor(false);
                             setShowCourseModal(true);
                           }}
                           className="px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 border border-zinc-700 flex items-center gap-1 cursor-pointer min-h-[40px]"
@@ -2127,11 +2171,12 @@ export const AdminDashboard: React.FC = () => {
                 {infraStatus?.supabase.serverConnected && (
                   <button
                     type="button"
+                    disabled={adminDataLoading}
                     onClick={refreshSupabaseAdminData}
-                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                    className="px-4 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-50"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Actualiser apprenants & commandes cloud</span>
+                    <RefreshCw className={`w-3.5 h-3.5 ${adminDataLoading ? 'animate-spin text-[#D4AF37]' : ''}`} />
+                    <span>{adminDataLoading ? 'Actualisation...' : 'Actualiser apprenants & commandes cloud'}</span>
                   </button>
                 )}
               </div>
@@ -2824,6 +2869,144 @@ export const AdminDashboard: React.FC = () => {
                     + Ajouter un module
                   </button>
                 </div>
+              </div>
+
+              {/* Final Exam / Quiz Editor (persisted safely in course_private_contents.final_quiz) */}
+              <div className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-[#F3E5AB] block">
+                      Examen final / Quiz certifiant ({editingCourse.finalQuiz?.length || 0} question(s))
+                    </span>
+                    <span className="text-[11px] text-zinc-400">
+                      Sauvegardé dans le coffre privé Supabase (accessible uniquement aux apprenants inscrits).
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowFinalQuizEditor((v) => !v)}
+                    className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-slate-200 font-semibold text-[11px] cursor-pointer"
+                  >
+                    {showFinalQuizEditor ? 'Masquer l’examen final' : 'Gérer l’examen final'}
+                  </button>
+                </div>
+
+                {showFinalQuizEditor && (
+                  <div className="space-y-3 pt-2 border-t border-zinc-800">
+                    {(editingCourse.finalQuiz || []).length === 0 ? (
+                      <p className="text-[11px] text-zinc-400">
+                        Aucune question définie pour l’examen final de cette formation.
+                      </p>
+                    ) : (
+                      (editingCourse.finalQuiz || []).map((q, qIdx) => (
+                        <div key={q.id} className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 space-y-2 text-[11px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-[#D4AF37]">Question {qIdx + 1}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const remaining = (editingCourse.finalQuiz || []).filter((item) => item.id !== q.id);
+                                setEditingCourse({
+                                  ...editingCourse,
+                                  finalQuiz: remaining.length > 0 ? remaining : undefined
+                                });
+                              }}
+                              className="text-red-400 hover:underline cursor-pointer"
+                            >
+                              Supprimer
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={q.question}
+                            onChange={(e) =>
+                              setEditingCourse({
+                                ...editingCourse,
+                                finalQuiz: (editingCourse.finalQuiz || []).map((item) =>
+                                  item.id === q.id ? { ...item, question: e.target.value } : item
+                                )
+                              })
+                            }
+                            placeholder="Intitulé de la question"
+                            className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-slate-100"
+                          />
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {q.options.map((opt, optIdx) => (
+                              <div key={optIdx} className="flex items-center gap-1.5">
+                                <input
+                                  type="radio"
+                                  name={`fq-correct-${q.id}`}
+                                  checked={q.correctIndex === optIdx}
+                                  onChange={() =>
+                                    setEditingCourse({
+                                      ...editingCourse,
+                                      finalQuiz: (editingCourse.finalQuiz || []).map((item) =>
+                                        item.id === q.id ? { ...item, correctIndex: optIdx } : item
+                                      )
+                                    })
+                                  }
+                                  title="Bonne réponse"
+                                />
+                                <input
+                                  type="text"
+                                  value={opt}
+                                  onChange={(e) =>
+                                    setEditingCourse({
+                                      ...editingCourse,
+                                      finalQuiz: (editingCourse.finalQuiz || []).map((item) =>
+                                        item.id === q.id
+                                          ? {
+                                              ...item,
+                                              options: item.options.map((o, i) => (i === optIdx ? e.target.value : o))
+                                            }
+                                          : item
+                                      )
+                                    })
+                                  }
+                                  placeholder={`Choix ${optIdx + 1}`}
+                                  className="flex-1 px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-slate-100"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                          <input
+                            type="text"
+                            value={q.explanation}
+                            onChange={(e) =>
+                              setEditingCourse({
+                                ...editingCourse,
+                                finalQuiz: (editingCourse.finalQuiz || []).map((item) =>
+                                  item.id === q.id ? { ...item, explanation: e.target.value } : item
+                                )
+                              })
+                            }
+                            placeholder="Explication pédagogique affichée après correction"
+                            className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300"
+                          />
+                        </div>
+                      ))
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newQ: QuizQuestion = {
+                          id: `fq-${Date.now()}`,
+                          question: 'Nouvelle question de validation finale',
+                          options: ['Réponse A', 'Réponse B', 'Réponse C', 'Réponse D'],
+                          correctIndex: 0,
+                          explanation: 'Explication pédagogique DJIFFA ACADEMY.'
+                        };
+                        setEditingCourse({
+                          ...editingCourse,
+                          finalQuiz: [...(editingCourse.finalQuiz || []), newQ]
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-[#D4AF37] hover:text-zinc-950 text-slate-100 font-semibold text-[11px] cursor-pointer"
+                    >
+                      + Ajouter une question à l’examen final
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-6 pt-2">

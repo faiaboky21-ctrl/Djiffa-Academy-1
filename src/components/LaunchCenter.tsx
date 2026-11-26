@@ -672,14 +672,16 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
     {
       id: 'step-security-code',
       step: 4,
-      title: 'Définir votre code secret Direction (ADMIN_ACCESS_CODE)',
+      title: 'Sécuriser la Direction (ADMIN_ACCESS_CODE & ADMIN_SESSION_SECRET)',
       detail: !audit
         ? auditAuthBlocked
-          ? 'Session Direction expirée : reconnectez-vous pour contrôler ADMIN_ACCESS_CODE et HMAC-SHA256.'
+          ? 'Session Direction expirée : reconnectez-vous pour contrôler ADMIN_ACCESS_CODE, ADMIN_SESSION_SECRET et HMAC-SHA256.'
           : 'Vérification du code Direction et de la signature HMAC en attente...'
+        : audit.security.customAdminCodeSet && audit.security.sessionSecretEnvSet
+        ? 'Code Direction personnalisé et clé permanente ADMIN_SESSION_SECRET actifs (jetons HMAC-SHA256).'
         : audit.security.customAdminCodeSet
-        ? 'Code Direction personnalisé actif côté serveur + jetons HMAC-SHA256.'
-        : 'Actuellement en mode démo (DJIFFA-ADMIN). Ajoutez ADMIN_ACCESS_CODE avant le lancement public.',
+        ? 'ADMIN_ACCESS_CODE actif, mais ADMIN_SESSION_SECRET manque sur Render : la session Direction expirera après redémarrage.'
+        : 'Actuellement en mode démo (DJIFFA-ADMIN). Définissez ADMIN_ACCESS_CODE et ADMIN_SESSION_SECRET sur Render avant ouverture publique.',
       status: securityStatus
     },
     {
@@ -1638,6 +1640,11 @@ export const LaunchCenter: React.FC<LaunchCenterProps> = ({ onNavigateAdminTab }
                   label: 'Code d’accès Direction personnalisé (ADMIN_ACCESS_CODE)',
                   ok: audit ? audit.security.customAdminCodeSet : null,
                   warnText: 'Mode démo actif — définissez ADMIN_ACCESS_CODE avant ouverture publique'
+                },
+                {
+                  label: 'Secret permanent de session Direction (ADMIN_SESSION_SECRET)',
+                  ok: audit ? audit.security.sessionSecretEnvSet : null,
+                  warnText: 'Clé temporaire en mémoire — définissez ADMIN_SESSION_SECRET sur Render pour conserver la session entre redémarrages'
                 },
                 {
                   label: 'Fichier .gitignore bloque l’envoi de .env sur GitHub',

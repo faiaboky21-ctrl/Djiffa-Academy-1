@@ -20,7 +20,9 @@ import {
   Play,
   Bell,
   Save,
-  Cloud
+  Cloud,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 
 interface StudentDashboardProps {
@@ -35,6 +37,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     courses,
     orders,
     coachingRequests,
+    coachingRequestsError,
+    coachingRequestsLoading,
+    refreshStudentCoachingRequests,
     notifications,
     markNotificationRead,
     navigateTo,
@@ -63,6 +68,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
       setProfileCountry(currentUser.country || 'Bénin');
     }
   }, [currentUser?.id, currentUser?.name, currentUser?.phone, currentUser?.country]);
+
+  useEffect(() => {
+    if (activeTab === 'coaching' && currentUser) {
+      refreshStudentCoachingRequests();
+    }
+  }, [activeTab, currentUser?.id, refreshStudentCoachingRequests]);
 
   if (!currentUser) {
     return (
@@ -94,7 +105,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
 
   const enrolledCourses = courses.filter((c) => currentUser.enrolledCourseIds.includes(c.id));
   const userOrders = orders.filter((o) => o.userEmail === currentUser.email || o.userId === currentUser.id);
-  const userCoaching = coachingRequests.filter((r) => r.userEmail === currentUser.email || r.userId === currentUser.id);
+  const normalizedCurrentEmail = (currentUser.email || '').trim().toLowerCase();
+  const userCoaching = coachingRequests.filter((r) => {
+    const reqEmail = (r.userEmail || '').trim().toLowerCase();
+    return (r.userId && r.userId === currentUser.id) || (normalizedCurrentEmail && reqEmail === normalizedCurrentEmail);
+  });
   const userNotifications = notifications.filter((n) => n.userId === 'all' || n.userId === currentUser.id);
 
   // Aggregate downloadable resources from all enrolled courses (keeping courseId for private signed URL resolution)
@@ -713,41 +728,85 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
         {/* Tab 6: Coaching */}
         {activeTab === 'coaching' && (
           <div className="space-y-6">
-            <h2 className="font-brand text-xl font-bold text-slate-100">Mes Demandes d’Accompagnement</h2>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <h2 className="font-brand text-xl font-bold text-slate-100">
+                Mes Demandes d’Accompagnement ({userCoaching.length})
+              </h2>
+              <button
+                type="button"
+                onClick={() => refreshStudentCoachingRequests()}
+                disabled={coachingRequestsLoading}
+                className="px-3.5 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${coachingRequestsLoading ? 'animate-spin' : ''}`} />
+                <span>{coachingRequestsLoading ? 'Actualisation...' : 'Actualiser'}</span>
+              </button>
+            </div>
+
+            {coachingRequestsError && (
+              <div className="p-3.5 rounded-xl bg-red-950/60 border border-red-700/70 text-xs text-red-200 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{coachingRequestsError}</span>
+              </div>
+            )}
+
             {userCoaching.length > 0 ? (
               <div className="space-y-4">
-                {userCoaching.map((req) => (
-                  <div key={req.id} className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-3 text-xs">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <span className="font-brand font-bold text-base text-slate-100">{req.programTitle}</span>
-                      <span
-                        className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase self-start sm:self-auto ${
-                          req.status === 'validated' || req.status === 'scheduled'
-                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                            : 'bg-amber-950 text-amber-400 border border-amber-800'
-                        }`}
-                      >
-                        Statut : {req.status === 'validated' ? 'Validé par la Directrice' : req.status}
-                      </span>
-                    </div>
-                    <p className="text-zinc-400 bg-zinc-900 p-3 rounded-lg border border-zinc-800">
-                      <strong>Votre besoin :</strong> {req.needDescription}
-                    </p>
-                    <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-400 pt-2 border-t border-zinc-900 gap-2">
-                      <span>Date souhaitée : {req.preferredDate}</span>
-                      {safeExternalUrl(req.meetingLink) && (
-                        <a
-                          href={safeExternalUrl(req.meetingLink)!}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="px-3 py-1 rounded bg-[#D4AF37] text-zinc-950 font-bold hover:bg-[#E5C158]"
+                {userCoaching.map((req) => {
+                  const statusLabel =
+                    req.status === 'validated'
+                      ? 'Validée par la Directrice'
+                      : req.status === 'scheduled'
+                      ? 'Rendez-vous planifié'
+                      : req.status === 'completed'
+                      ? 'Session terminée'
+                      : req.status === 'cancelled'
+                      ? 'Annulée'
+                      : 'En attente';
+                  const statusStyle =
+                    req.status === 'validated' || req.status === 'scheduled' || req.status === 'completed'
+                      ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                      : req.status === 'cancelled'
+                      ? 'bg-red-950 text-red-300 border border-red-800'
+                      : 'bg-amber-950 text-amber-400 border border-amber-800';
+
+                  return (
+                    <div key={req.id} className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-3 text-xs">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <span className="font-brand font-bold text-base text-slate-100 block">
+                            {req.programTitle}
+                          </span>
+                          <span className="text-[11px] text-zinc-500">
+                            Soumise le {new Date(req.createdAt).toLocaleDateString('fr-FR')}
+                            {req.userPhone ? ` · WhatsApp : ${req.userPhone}` : ''}
+                          </span>
+                        </div>
+                        <span
+                          className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase self-start sm:self-auto ${statusStyle}`}
                         >
-                          Lien Visio →
-                        </a>
-                      )}
+                          Statut : {statusLabel}
+                        </span>
+                      </div>
+                      <p className="text-zinc-400 bg-zinc-900 p-3 rounded-lg border border-zinc-800">
+                        <strong>Votre besoin :</strong> {req.needDescription}
+                      </p>
+                      <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-400 pt-2 border-t border-zinc-900 gap-2">
+                        <span>Date souhaitée : {req.preferredDate}</span>
+                        {safeExternalUrl(req.meetingLink) && (
+                          <a
+                            href={safeExternalUrl(req.meetingLink)!}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="px-3 py-1 rounded bg-[#D4AF37] text-zinc-950 font-bold hover:bg-[#E5C158]"
+                          >
+                            Lien Visio →
+                          </a>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="p-8 text-center rounded-2xl bg-zinc-950 border border-zinc-800 space-y-3">

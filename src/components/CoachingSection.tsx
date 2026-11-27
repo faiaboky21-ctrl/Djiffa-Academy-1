@@ -11,7 +11,8 @@ import {
   CheckCircle,
   Send,
   ShieldCheck,
-  ArrowRight
+  ArrowRight,
+  AlertCircle
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -32,6 +33,8 @@ export const CoachingSection: React.FC = () => {
   const [needDescription, setNeedDescription] = useState('');
   const [preferredDate, setPreferredDate] = useState('');
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     if (currentUser) {
@@ -43,25 +46,41 @@ export const CoachingSection: React.FC = () => {
 
   const activeProgram = coachingPrograms.find(p => p.type === selectedProgramType) || coachingPrograms[0];
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userName.trim() || !userEmail.trim() || !needDescription.trim() || !preferredDate) return;
+    if (submitting) return;
+    if (!userName.trim() || !userEmail.trim() || !userPhone.trim() || !needDescription.trim() || !preferredDate) {
+      setSubmitError('Veuillez remplir tous les champs obligatoires (nom, email, WhatsApp, date souhaitée et besoin).');
+      return;
+    }
 
-    submitCoachingRequest({
+    setSubmitting(true);
+    setSubmitError(null);
+
+    const result = await submitCoachingRequest({
       userName: userName.trim(),
       userEmail: userEmail.trim(),
-      userPhone,
+      userPhone: userPhone.trim(),
       type: selectedProgramType,
       programTitle: activeProgram.title,
-      needDescription,
+      needDescription: needDescription.trim(),
       preferredDate
     });
+
+    setSubmitting(false);
+
+    if (!result.ok) {
+      setSubmitError(
+        result.error || 'Impossible d’enregistrer votre demande d’accompagnement. Veuillez réessayer.'
+      );
+      return;
+    }
 
     setSubmittedSuccess(true);
     try {
       confetti({ particleCount: 60, spread: 60, origin: { y: 0.6 } });
-    } catch (e) {
-      console.error(e);
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -264,12 +283,20 @@ export const CoachingSection: React.FC = () => {
                 </span>
               </div>
 
+              {submitError && (
+                <div className="p-3.5 rounded-lg bg-red-950/60 border border-red-700/70 text-xs text-red-200 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{submitError}</span>
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="w-full py-4 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase tracking-wider transition-all shadow-xl flex items-center justify-center gap-2 cursor-pointer"
+                disabled={submitting}
+                className="w-full py-4 px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] disabled:opacity-60 disabled:cursor-not-allowed text-zinc-950 font-bold text-xs uppercase tracking-wider transition-all shadow-xl flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Send className="w-4 h-4" />
-                <span>Soumettre ma demande d’accompagnement</span>
+                <span>{submitting ? 'Enregistrement en cours...' : 'Soumettre ma demande d’accompagnement'}</span>
               </button>
             </form>
           ) : (

@@ -89,6 +89,8 @@ interface AppContextType {
   language: Language;
   orders: Order[];
   coachingRequests: CoachingRequest[];
+  coachingRequestsError: string | null;
+  coachingRequestsLoading: boolean;
   contactMessages: ContactMessage[];
   paymentEvents: PaymentEventLog[];
   paymentEventsError: string | null;
@@ -173,7 +175,8 @@ interface AppContextType {
       userName?: string;
       userEmail?: string;
     }
-  ) => CoachingRequest;
+  ) => Promise<{ ok: boolean; request?: CoachingRequest; error?: string }>;
+  refreshStudentCoachingRequests: () => Promise<void>;
   submitContactMessage: (data: {
     name: string;
     email: string;
@@ -205,7 +208,12 @@ interface AppContextType {
   updateSiteSettings: (settings: SiteSettings) => void;
   updateOrderStatus: (orderId: string, status: Order['status']) => void;
   refundOrderServer: (orderId: string) => Promise<{ ok: boolean; message?: string }>;
-  updateCoachingStatus: (id: string, status: CoachingRequest['status'], meetingLink?: string, adminNotes?: string) => void;
+  updateCoachingStatus: (
+    id: string,
+    status: CoachingRequest['status'],
+    meetingLink?: string,
+    adminNotes?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   updatePaymentConfig: (config: PaymentGatewayConfig) => void;
   grantManualCourseAccess: (userId: string, courseId: string) => void;
   revokeCourseAccess: (userId: string, courseId: string) => void;
@@ -518,6 +526,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [paymentEventsError, setPaymentEventsError] = useState<string | null>(null);
   const [paymentEventsAuthBlocked, setPaymentEventsAuthBlocked] = useState(false);
   const [paymentEventsNotice, setPaymentEventsNotice] = useState<string | null>(null);
+  const [coachingRequestsError, setCoachingRequestsError] = useState<string | null>(null);
+  const [coachingRequestsLoading, setCoachingRequestsLoading] = useState(false);
   const [adminDataLoading, setAdminDataLoading] = useState(false);
   const adminDataFetchInFlightRef = useRef(false);
 
@@ -537,6 +547,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
         ...prev
       ]);
+    },
+    []
+  );
+
+  const syncCoachingNotifications = useCallback(
+    (requests: CoachingRequest[], fallbackUserId?: string) => {
+      if (!Array.isArray(requests) || requests.length === 0) return;
+
+      const copyByStatus: Record<CoachingRequest['status'], { title: string; buildMsg: (r: CoachingRequest) => string }> = {
+        pending: {
+          title: 'Demande d’accompagnement enregistrée',
+          buildMsg: (r) =>
+            `Votre demande pour « ${r.programTitle} » est en attente de validation par Faith Ariola.`
+        },
+        validated: {
+          title: 'Accompagnement validé',
+          buildMsg: (r) =>
+            `Votre demande pour « ${r.programTitle} » a été validée par Faith Ariola.`
+        },
+        scheduled: {
+          title: 'Rendez-vous d’accompagnement planifié',
+          buildMsg: (r) =>
+            `Votre session pour « ${r.programTitle} » est planifiée (${r.preferredDate})${
+              r.meetingLink ? ' — lien visio disponible.' : '.'
+            }`
+        },
+        completed: {
+          title: 'Session d’accompagnement terminée',
+          buildMsg: (r) =>
+            `Votre session pour « ${r.programTitle} » est marquée comme terminée.`
+        },
+        cancelled: {
+          title: 'Demande d’accompagnement annulée',
+          buildMsg: (r) => `Votre demande pour « ${r.programTitle} » a été annulée.`
+        }
+      };
+
+      setNotifications((prev) => {
+        const additions: NotificationItem[] = [];
+        for (const req of requests) {
+          const targetUserId = req.userId || fallbackUserId || 'all';
+          const detId = `notif-coaching-${req.id}-${req.status}`;
+          const meta = copyByStatus[req.status] || copyByStatus.pending;
+          const alreadyExists = prev.some(
+            (n) =>
+              n.id === detId ||
+              (req.status === 'pending' &&
+                n.category === 'coaching' &&
+                n.title === 'Demande d’accompagnement enregistrée' &&
+                n.message.includes(req.programTitle) &&
+                (n.userId === targetUserId || (fallbackUserId && n.userId === fallbackUserId)))
+          );
+          if (!alreadyExists && !additions.some((a) => a.id === detId)) {
+            additions.push({
+              id: detId,
+              userId: targetUserId,
+              title: meta.title,
+              message: meta.buildMsg(req),
+              category: 'coaching',
+              read: false,
+              createdAt: req.createdAt || new Date().toISOString()
+            });
+          }
+        }
+        if (additions.length === 0) return prev;
+        return [...additions, ...prev];
+      });
     },
     []
   );
@@ -743,22 +820,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               .catch(() => null)
           : Promise.resolve(null);
 
+        const serverCoachingPromise = accessToken
+          ? fetch('/api/student/coaching-requests', {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            })
+              .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => null) }))
+              .catch(() => ({
+                ok: false,
+                body: { error: 'Erreur réseau lors du chargement des demandes d’accompagnement.' }
+              }))
+          : Promise.resolve(null);
+
         const [
           { data: profile },
           enrollRes,
           { data: progRows },
           { data: certRows },
           ordersRes,
-          { data: coachReqRows },
-          serverEnrollData
+          serverEnrollData,
+          serverCoachingData
         ] = await Promise.all([
           supabase.from('profiles').select('*').eq('id', authUserId).maybeSingle(),
           supabase.from('enrollments').select('*').eq('user_id', authUserId),
           supabase.from('lesson_progress').select('*').eq('user_id', authUserId),
           supabase.from('certificates').select('*').eq('user_id', authUserId),
           supabase.from('orders').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
-          supabase.from('coaching_requests').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
-          serverEnrollPromise
+          serverEnrollPromise,
+          serverCoachingPromise
         ]);
 
         if (enrollRes.error) {
@@ -868,23 +956,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
 
-        if (Array.isArray(coachReqRows)) {
-          setCoachingRequests(
-            coachReqRows.map((r: any) => ({
-              id: r.id,
-              userId: r.user_id,
-              userName: r.user_name,
-              userEmail: r.user_email,
-              userPhone: r.user_phone,
-              type: r.type,
-              programTitle: r.program_title,
-              needDescription: r.need_description,
-              preferredDate: r.preferred_date,
-              status: r.status,
-              meetingLink: r.meeting_link || undefined,
-              adminNotes: r.admin_notes || undefined,
-              createdAt: r.created_at
+        if (
+          serverCoachingData?.ok &&
+          serverCoachingData.body?.ok &&
+          Array.isArray(serverCoachingData.body.coachingRequests)
+        ) {
+          const serverCoachRows: CoachingRequest[] = serverCoachingData.body.coachingRequests
+            .map((r: any) => ({
+              id: String(r.id),
+              userId: r.userId ? String(r.userId) : authUserId,
+              userName: String(r.userName || ''),
+              userEmail: String(r.userEmail || ''),
+              userPhone: String(r.userPhone || ''),
+              type: r.type === 'collective' ? 'collective' : 'individual',
+              programTitle: String(r.programTitle || ''),
+              needDescription: String(r.needDescription || ''),
+              preferredDate: String(r.preferredDate || ''),
+              status: r.status || 'pending',
+              meetingLink: r.meetingLink || undefined,
+              createdAt: String(r.createdAt || new Date().toISOString())
             }))
+            .sort(
+              (a: CoachingRequest, b: CoachingRequest) =>
+                new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+            );
+
+          setCoachingRequests(serverCoachRows);
+          setCoachingRequestsError(null);
+          syncCoachingNotifications(serverCoachRows, authUserId);
+        } else if (serverCoachingData && (!serverCoachingData.ok || !serverCoachingData.body?.ok)) {
+          setCoachingRequestsError(
+            serverCoachingData.body?.error || 'Impossible de charger vos demandes d’accompagnement.'
           );
         }
 
@@ -894,8 +996,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         console.warn('Supabase user hydration warning:', err);
       }
     },
-    [hydratePublicFromSupabase]
+    [hydratePublicFromSupabase, syncCoachingNotifications]
   );
+
+  const refreshStudentCoachingRequests = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) return;
+    setCoachingRequestsLoading(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const authUser = sessionData.session?.user;
+      const accessToken = sessionData.session?.access_token;
+      if (!authUser || !accessToken) return;
+
+      const serverRes = await fetch('/api/student/coaching-requests', {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      })
+        .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => null) }))
+        .catch(() => ({
+          ok: false,
+          body: { error: 'Erreur réseau lors de l’actualisation de vos demandes d’accompagnement.' }
+        }));
+
+      if (serverRes.ok && serverRes.body?.ok && Array.isArray(serverRes.body.coachingRequests)) {
+        const sorted: CoachingRequest[] = serverRes.body.coachingRequests
+          .map((r: any) => ({
+            id: String(r.id),
+            userId: r.userId ? String(r.userId) : authUser.id,
+            userName: String(r.userName || ''),
+            userEmail: String(r.userEmail || ''),
+            userPhone: String(r.userPhone || ''),
+            type: r.type === 'collective' ? 'collective' : 'individual',
+            programTitle: String(r.programTitle || ''),
+            needDescription: String(r.needDescription || ''),
+            preferredDate: String(r.preferredDate || ''),
+            status: r.status || 'pending',
+            meetingLink: r.meetingLink || undefined,
+            createdAt: String(r.createdAt || new Date().toISOString())
+          }))
+          .sort(
+            (a: CoachingRequest, b: CoachingRequest) =>
+              new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+          );
+
+        setCoachingRequests(sorted);
+        setCoachingRequestsError(null);
+        syncCoachingNotifications(sorted, authUser.id);
+      } else {
+        setCoachingRequestsError(
+          serverRes.body?.error || 'Impossible d’actualiser vos demandes d’accompagnement.'
+        );
+      }
+    } finally {
+      setCoachingRequestsLoading(false);
+    }
+  }, [syncCoachingNotifications]);
 
   const refreshServerPaymentStatus = useCallback(async () => {
     try {
@@ -1029,7 +1183,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
 
-      if (Array.isArray(data.coachingRequests)) {
+      if (data.coachingRequestsError) {
+        setCoachingRequestsError(String(data.coachingRequestsError));
+      } else {
+        setCoachingRequestsError(null);
+      }
+
+      if (Array.isArray(data.coachingRequests) && (!data.coachingRequestsError || data.coachingRequests.length > 0)) {
         setCoachingRequests(
           data.coachingRequests.map((r: any) => ({
             id: r.id,
@@ -2145,61 +2305,85 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, order: newOrder };
   };
 
-  const submitCoachingRequest = (
+  const submitCoachingRequest = async (
     data: Omit<CoachingRequest, 'id' | 'createdAt' | 'status' | 'userId' | 'userName' | 'userEmail'> & {
       userName?: string;
       userEmail?: string;
     }
-  ): CoachingRequest => {
-    const user = currentUser || {
-      id: `usr-guest-${Date.now()}`,
-      name: data.userName?.trim() || 'Client Accompagnement',
-      email: data.userEmail?.trim() || 'client@djiffa.com'
-    };
+  ): Promise<{ ok: boolean; request?: CoachingRequest; error?: string }> => {
+    const cleanName = (data.userName ?? currentUser?.name ?? '').trim();
+    const cleanEmail = (data.userEmail ?? currentUser?.email ?? '').trim();
+    const cleanPhone = (data.userPhone ?? '').trim();
+    const cleanNeed = (data.needDescription ?? '').trim();
+    const cleanDate = (data.preferredDate ?? '').trim();
 
-    const newReq: CoachingRequest = {
-      userPhone: data.userPhone,
-      type: data.type,
-      programTitle: data.programTitle,
-      needDescription: data.needDescription,
-      preferredDate: data.preferredDate,
-      id: `req-${Date.now()}`,
-      userId: user.id,
-      userName: data.userName?.trim() || user.name,
-      userEmail: data.userEmail?.trim() || user.email,
-      status: 'pending',
-      createdAt: new Date().toISOString()
-    };
+    if (!cleanName || !cleanEmail || !cleanPhone || !cleanNeed || !cleanDate) {
+      return {
+        ok: false,
+        error: 'Veuillez renseigner votre nom, email, téléphone WhatsApp, date souhaitée et description du projet.'
+      };
+    }
 
-    setCoachingRequests((prev) => [newReq, ...prev]);
+    const fallbackUserId = currentUser?.id || `usr-guest-${Date.now()}`;
 
-    getSupabaseAccessToken()
-      .then((supabaseToken) => {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (supabaseToken) headers['Authorization'] = `Bearer ${supabaseToken}`;
-        return fetch('/api/public/coaching-request', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(newReq)
-        });
-      })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((serverData) => {
-        if (serverData?.ok && serverData.id && serverData.id !== newReq.id) {
-          setCoachingRequests((prev) =>
-            prev.map((r) => (r.id === newReq.id ? { ...r, id: String(serverData.id) } : r))
-          );
-        }
-      })
-      .catch(() => undefined);
+    try {
+      const supabaseToken = await getSupabaseAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (supabaseToken) headers['Authorization'] = `Bearer ${supabaseToken}`;
 
-    pushNotification(
-      user.id,
-      'Demande d’accompagnement enregistrée',
-      `Votre demande pour « ${data.programTitle} » est en attente de validation par Faith Ariola.`,
-      'coaching'
-    );
-    return newReq;
+      const res = await fetch('/api/public/coaching-request', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userName: cleanName,
+          userEmail: cleanEmail,
+          userPhone: cleanPhone,
+          type: data.type,
+          programTitle: data.programTitle,
+          needDescription: cleanNeed,
+          preferredDate: cleanDate
+        })
+      });
+
+      const serverData = await res.json().catch(() => null);
+      if (!res.ok || !serverData?.ok) {
+        return {
+          ok: false,
+          error:
+            serverData?.error ||
+            'Impossible d’enregistrer votre demande d’accompagnement. Veuillez réessayer.'
+        };
+      }
+
+      const srv = serverData.request || {};
+      const savedReq: CoachingRequest = {
+        id: String(srv.id || serverData.id || `req-${Date.now()}`),
+        userId: String(srv.userId || currentUser?.id || fallbackUserId),
+        userName: String(srv.userName || cleanName),
+        userEmail: String(srv.userEmail || cleanEmail),
+        userPhone: String(srv.userPhone || cleanPhone),
+        type: srv.type === 'collective' ? 'collective' : data.type,
+        programTitle: String(srv.programTitle || data.programTitle),
+        needDescription: String(srv.needDescription || cleanNeed),
+        preferredDate: String(srv.preferredDate || cleanDate),
+        status: srv.status || 'pending',
+        meetingLink: srv.meetingLink || undefined,
+        adminNotes: srv.adminNotes || undefined,
+        createdAt: String(srv.createdAt || new Date().toISOString())
+      };
+
+      setCoachingRequests((prev) => [savedReq, ...prev.filter((r) => r.id !== savedReq.id)]);
+      syncCoachingNotifications([savedReq], currentUser?.id || savedReq.userId);
+      return { ok: true, request: savedReq };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error && err.message
+            ? `Erreur réseau lors de l’envoi : ${err.message}`
+            : 'Erreur réseau lors de l’enregistrement de votre demande. Veuillez vérifier votre connexion.'
+      };
+    }
   };
 
   const submitContactMessage = async (data: {
@@ -2477,31 +2661,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updateCoachingStatus = (
+  const updateCoachingStatus = async (
     id: string,
     status: CoachingRequest['status'],
     meetingLink?: string,
     adminNotes?: string
-  ) => {
+  ): Promise<{ ok: boolean; error?: string }> => {
     const target = coachingRequests.find((r) => r.id === id);
+    const nextMeetingLink = meetingLink !== undefined ? meetingLink : target?.meetingLink;
+    const nextAdminNotes = adminNotes !== undefined ? adminNotes : target?.adminNotes;
+
+    if (infraStatus?.supabase.serverConnected) {
+      const supabaseToken = await getSupabaseAccessToken();
+      if (!adminToken && !supabaseToken) {
+        return { ok: false, error: 'Session Direction requise pour modifier le statut.' };
+      }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+      if (supabaseToken) headers['X-Supabase-Token'] = supabaseToken;
+      try {
+        const res = await fetch('/api/supabase/admin-action', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            action: 'update_coaching_status',
+            payload: {
+              id,
+              status,
+              meetingLink: nextMeetingLink,
+              adminNotes: nextAdminNotes
+            }
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) {
+          return {
+            ok: false,
+            error: data?.error || 'Impossible de mettre à jour la demande dans Supabase.'
+          };
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Erreur réseau lors de la mise à jour.'
+        };
+      }
+    }
+
     setCoachingRequests((prev) =>
       prev.map((r) =>
         r.id === id
           ? {
               ...r,
               status,
-              meetingLink: meetingLink !== undefined ? meetingLink : r.meetingLink,
-              adminNotes: adminNotes !== undefined ? adminNotes : r.adminNotes
+              meetingLink: nextMeetingLink,
+              adminNotes: nextAdminNotes
             }
           : r
       )
     );
-    dispatchAdminSync('update_coaching_status', {
-      id,
-      status,
-      meetingLink: meetingLink !== undefined ? meetingLink : target?.meetingLink,
-      adminNotes: adminNotes !== undefined ? adminNotes : target?.adminNotes
-    });
+
+    if (target) {
+      syncCoachingNotifications(
+        [
+          {
+            ...target,
+            status,
+            meetingLink: nextMeetingLink,
+            adminNotes: nextAdminNotes
+          }
+        ],
+        target.userId
+      );
+    }
+
+    return { ok: true };
   };
 
   const updatePaymentConfig = (config: PaymentGatewayConfig) => {
@@ -2554,6 +2788,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         language,
         orders,
         coachingRequests,
+        coachingRequestsError,
+        coachingRequestsLoading,
         contactMessages,
         paymentEvents,
         paymentEventsError,
@@ -2600,6 +2836,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         verifyExistingPayment,
         refreshServerPaymentStatus,
         submitCoachingRequest,
+        refreshStudentCoachingRequests,
         submitContactMessage,
         updateContactMessageStatus,
         markNotificationRead,

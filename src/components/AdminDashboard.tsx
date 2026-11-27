@@ -78,6 +78,7 @@ export const AdminDashboard: React.FC = () => {
     students,
     orders,
     coachingRequests,
+    coachingRequestsError,
     contactMessages,
     paymentEvents,
     paymentEventsError,
@@ -160,8 +161,9 @@ export const AdminDashboard: React.FC = () => {
   const [messageFilter, setMessageFilter] = useState<'all' | ContactMessage['status']>('all');
   const [msgNoteDrafts, setMsgNoteDrafts] = useState<Record<string, string>>({});
 
-  // Coaching note drafts
+  // Coaching note drafts & feedback
   const [coachNoteDrafts, setCoachNoteDrafts] = useState<Record<string, string>>({});
+  const [coachingActionFeedback, setCoachingActionFeedback] = useState<{ ok: boolean; message: string } | null>(null);
 
   // Webhook URL copy feedback
   const [copiedWebhook, setCopiedWebhook] = useState(false);
@@ -213,6 +215,12 @@ export const AdminDashboard: React.FC = () => {
     refreshAdminTelemetry,
     refreshSupabaseAdminData
   ]);
+
+  useEffect(() => {
+    if (activeTab === 'coaching' && currentUser?.role === 'admin' && infraStatus?.supabase.serverConnected) {
+      refreshSupabaseAdminData();
+    }
+  }, [activeTab, currentUser?.role, infraStatus?.supabase.serverConnected, refreshSupabaseAdminData]);
 
   // Strict security gate
   if (!currentUser || currentUser.role !== 'admin') {
@@ -1363,9 +1371,47 @@ export const AdminDashboard: React.FC = () => {
               </div>
             </div>
 
-            <h2 className="font-brand text-xl font-bold text-slate-100">
-              Demandes d’Accompagnement Reçues ({coachingRequests.length})
-            </h2>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <h2 className="font-brand text-xl font-bold text-slate-100">
+                Demandes d’Accompagnement Reçues ({coachingRequests.length})
+              </h2>
+              <button
+                type="button"
+                onClick={() => refreshSupabaseAdminData()}
+                disabled={adminDataLoading}
+                className="px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${adminDataLoading ? 'animate-spin' : ''}`} />
+                <span>{adminDataLoading ? 'Actualisation...' : 'Actualiser'}</span>
+              </button>
+            </div>
+
+            {coachingRequestsError && (
+              <div className="p-3.5 rounded-xl bg-red-950/60 border border-red-700/70 text-xs text-red-200 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>Erreur lecture Supabase (coaching_requests) : {coachingRequestsError}</span>
+              </div>
+            )}
+
+            {coachingActionFeedback && (
+              <div
+                className={`p-3 rounded-xl text-xs border flex items-center justify-between gap-2 ${
+                  coachingActionFeedback.ok
+                    ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-200'
+                    : 'bg-red-950/60 border-red-700/60 text-red-200'
+                }`}
+              >
+                <span>{coachingActionFeedback.message}</span>
+                <button
+                  type="button"
+                  onClick={() => setCoachingActionFeedback(null)}
+                  className="text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             <div className="space-y-4">
               {coachingRequests.length === 0 ? (
                 <div className="p-8 text-center rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400">
@@ -1382,11 +1428,21 @@ export const AdminDashboard: React.FC = () => {
                         <h3 className="font-brand text-base font-bold text-slate-100">
                           {req.userName} ({req.userEmail} · {req.userPhone})
                         </h3>
+                        <span className="text-[11px] text-zinc-500 block mt-0.5">
+                          Reçue le {new Date(req.createdAt).toLocaleString('fr-FR')}
+                        </span>
                       </div>
 
                       <select
                         value={req.status}
-                        onChange={(e) => updateCoachingStatus(req.id, e.target.value as any)}
+                        onChange={async (e) => {
+                          const res = await updateCoachingStatus(req.id, e.target.value as any);
+                          setCoachingActionFeedback(
+                            res.ok
+                              ? { ok: true, message: 'Statut mis à jour et synchronisé.' }
+                              : { ok: false, message: res.error || 'Échec mise à jour du statut.' }
+                          );
+                        }}
                         className="bg-zinc-900 border border-zinc-700 text-xs rounded-lg px-3 py-2 text-slate-200 cursor-pointer"
                       >
                         <option value="pending">En attente de validation</option>
@@ -1410,9 +1466,15 @@ export const AdminDashboard: React.FC = () => {
                           type="url"
                           defaultValue={req.meetingLink || ''}
                           placeholder="Lien Google Meet / Zoom..."
-                          onBlur={(e) => {
+                          onBlur={async (e) => {
                             if (e.target.value !== (req.meetingLink || '')) {
-                              updateCoachingStatus(req.id, req.status, e.target.value);
+                              const res = await updateCoachingStatus(req.id, req.status, e.target.value);
+                              if (!res.ok) {
+                                setCoachingActionFeedback({
+                                  ok: false,
+                                  message: res.error || 'Échec sauvegarde du lien visio.'
+                                });
+                              }
                             }
                           }}
                           className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-slate-100"
@@ -1433,14 +1495,19 @@ export const AdminDashboard: React.FC = () => {
                           />
                           <button
                             type="button"
-                            onClick={() =>
-                              updateCoachingStatus(
+                            onClick={async () => {
+                              const res = await updateCoachingStatus(
                                 req.id,
                                 req.status,
                                 req.meetingLink,
                                 coachNoteDrafts[req.id] ?? req.adminNotes ?? ''
-                              )
-                            }
+                              );
+                              setCoachingActionFeedback(
+                                res.ok
+                                  ? { ok: true, message: 'Notes enregistrées dans Supabase.' }
+                                  : { ok: false, message: res.error || 'Échec sauvegarde des notes.' }
+                              );
+                            }}
                             className="px-3 py-2 rounded-lg bg-[#D4AF37] text-zinc-950 font-bold text-[11px] cursor-pointer shrink-0"
                           >
                             Enregistrer

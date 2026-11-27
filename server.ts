@@ -62,9 +62,58 @@ interface ServerContactMessage {
   createdAt: string;
 }
 
+interface ServerCoachingRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  userPhone: string;
+  type: 'individual' | 'collective';
+  programTitle: string;
+  needDescription: string;
+  preferredDate: string;
+  status: 'pending' | 'validated' | 'scheduled' | 'completed' | 'cancelled';
+  meetingLink?: string;
+  adminNotes?: string;
+  createdAt: string;
+}
+
 const recentPaymentEvents: ServerPaymentEvent[] = [];
 const recentContactMessages: ServerContactMessage[] = [];
+const recentCoachingRequests: ServerCoachingRequest[] = [];
 let lastInvalidWebhookLogAt = 0;
+
+const STUDENT_COACHING_COLUMNS =
+  'id, user_id, user_name, user_email, user_phone, type, program_title, need_description, preferred_date, status, meeting_link, created_at';
+
+function mapCoachingRow(r: any, includeAdminNotes = false): ServerCoachingRequest {
+  const mapped: ServerCoachingRequest = {
+    id: String(r.id),
+    userId: r.user_id ? String(r.user_id) : '',
+    userName: String(r.user_name || ''),
+    userEmail: String(r.user_email || ''),
+    userPhone: String(r.user_phone || ''),
+    type: r.type === 'collective' ? 'collective' : 'individual',
+    programTitle: String(r.program_title || 'Accompagnement DJIFFA ACADEMY'),
+    needDescription: String(r.need_description || ''),
+    preferredDate: String(r.preferred_date || ''),
+    status:
+      r.status === 'validated' ||
+      r.status === 'scheduled' ||
+      r.status === 'completed' ||
+      r.status === 'cancelled'
+        ? r.status
+        : 'pending',
+    meetingLink: r.meeting_link ? String(r.meeting_link) : undefined,
+    createdAt: r.created_at ? String(r.created_at) : new Date().toISOString()
+  };
+
+  if (includeAdminNotes && r.admin_notes) {
+    mapped.adminNotes = String(r.admin_notes);
+  }
+
+  return mapped;
+}
 
 function getEffectiveServerPaymentMode(): 'sandbox' | 'live' {
   return (process.env.PAYMENT_MODE || 'sandbox').trim().toLowerCase() === 'live' ? 'live' : 'sandbox';
@@ -365,6 +414,82 @@ async function findAuthUserIdByEmail(email: string): Promise<string | null> {
     return null;
   }
   return null;
+}
+
+async function ensureSupabaseProfileForUser(
+  userId: string | null,
+  fallbackEmail: string | null,
+  fallbackName?: string,
+  fallbackPhone?: string
+): Promise<string | null> {
+  if (!supabaseAdmin || !userId || !/^[0-9a-f-]{36}$/i.test(userId)) {
+    return null;
+  }
+
+  try {
+    const { data: existingById } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('id', userId)
+      .maybeSingle();
+    if (existingById?.id) {
+      return existingById.id;
+    }
+
+    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.getUserById(userId);
+    if (authErr || !authData?.user) {
+      return null;
+    }
+
+    const effectiveEmail = (authData.user.email || fallbackEmail || '').trim();
+    if (effectiveEmail) {
+      const { data: existingByEmail } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .ilike('email', effectiveEmail)
+        .maybeSingle();
+      if (existingByEmail?.id) {
+        return existingByEmail.id;
+      }
+    }
+
+    const safeEmail = effectiveEmail || `${userId}@djiffa-academy.local`;
+    const safeName =
+      (authData.user.user_metadata?.name as string | undefined)?.trim() ||
+      fallbackName?.trim() ||
+      safeEmail.split('@')[0] ||
+      'Apprenant DJIFFA';
+    const safePhone =
+      (authData.user.user_metadata?.phone as string | undefined)?.trim() ||
+      fallbackPhone?.trim() ||
+      null;
+
+    const { error: upsertErr } = await supabaseAdmin.from('profiles').upsert(
+      {
+        id: userId,
+        email: safeEmail,
+        name: safeName,
+        phone: safePhone,
+        country: (authData.user.user_metadata?.country as string | undefined) || 'Bénin',
+        role: 'student'
+      },
+      { onConflict: 'id', ignoreDuplicates: true }
+    );
+
+    if (upsertErr) {
+      console.warn('[Coaching] Profile ensure warning:', upsertErr.message);
+      const { data: retryProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .eq('id', userId)
+        .maybeSingle();
+      return retryProfile?.id || null;
+    }
+
+    return userId;
+  } catch {
+    return null;
+  }
 }
 
 async function activateOrderEnrollmentInSupabase(reference: string, providerTransactionId?: string) {
@@ -1040,6 +1165,88 @@ async function startServer() {
     }
   });
 
+  // 3a-bis. Authenticated Student Coaching Requests Read (server-verified JWT, excludes private admin_notes)
+  app.get('/api/student/coaching-requests', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.userId) {
+      res.status(401).json({ ok: false, error: 'Authentification apprenant requise.' });
+      return;
+    }
+
+    const cleanEmail = (caller.email || '').trim().toLowerCase();
+
+    if (!supabaseAdmin) {
+      const localItems = recentCoachingRequests
+        .filter((r) => {
+          const reqEmail = (r.userEmail || '').trim().toLowerCase();
+          return (
+            (r.userId && r.userId === caller.userId) ||
+            (!r.userId && cleanEmail && reqEmail === cleanEmail) ||
+            (cleanEmail && reqEmail === cleanEmail)
+          );
+        })
+        .map((r) => {
+          const { adminNotes: _omit, ...studentSafeItem } = r;
+          return studentSafeItem;
+        });
+      res.json({ ok: true, localOnly: true, coachingRequests: localItems });
+      return;
+    }
+
+    try {
+      const lookupUserIds = await resolveCallerLookupIds(caller.userId, caller.email);
+      const idList = Array.from(lookupUserIds);
+
+      const [byIdRes, byEmailRes] = await Promise.all([
+        idList.length > 0
+          ? supabaseAdmin
+              .from('coaching_requests')
+              .select(STUDENT_COACHING_COLUMNS)
+              .in('user_id', idList)
+              .order('created_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null }),
+        cleanEmail
+          ? supabaseAdmin
+              .from('coaching_requests')
+              .select(STUDENT_COACHING_COLUMNS)
+              .ilike('user_email', cleanEmail)
+              .order('created_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null })
+      ]);
+
+      if (byIdRes.error && byEmailRes.error) {
+        res.status(500).json({
+          ok: false,
+          error: `Impossible de lire vos demandes d’accompagnement (${byIdRes.error.message}).`
+        });
+        return;
+      }
+
+      const mergedMap = new Map<string, ServerCoachingRequest>();
+      [...(byIdRes.data || []), ...(byEmailRes.data || [])].forEach((row: any) => {
+        if (!row?.id) return;
+        const rowEmail = String(row.user_email || '').trim().toLowerCase();
+        const ownerMatches =
+          (row.user_id && lookupUserIds.has(String(row.user_id))) ||
+          (!row.user_id && cleanEmail && rowEmail === cleanEmail);
+        if (ownerMatches && !mergedMap.has(String(row.id))) {
+          mergedMap.set(String(row.id), mapCoachingRow(row, false));
+        }
+      });
+
+      const items = Array.from(mergedMap.values()).sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+
+      res.json({ ok: true, coachingRequests: items });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur lecture des demandes d’accompagnement.'
+      });
+    }
+  });
+
   // 3b. Public Contact Form Submission (persisted server-side & in Supabase contact_messages when available)
   app.post('/api/public/contact', publicFormLimiter, async (req, res) => {
     const { name, email, phone, subject, message } = req.body || {};
@@ -1091,7 +1298,6 @@ async function startServer() {
   app.post('/api/public/coaching-request', publicFormLimiter, async (req, res) => {
     const caller = await resolveCallerAuth(req);
     const {
-      userId,
       userName,
       userEmail,
       userPhone,
@@ -1102,27 +1308,40 @@ async function startServer() {
     } = req.body || {};
 
     const cleanName = String(userName || '').trim().slice(0, 120);
-    const cleanEmail = String(userEmail || '').trim().slice(0, 160);
+    const cleanEmail = String(userEmail || caller.email || '').trim().slice(0, 160);
     const cleanPhone = String(userPhone || '').trim().slice(0, 40);
     const cleanNeed = String(needDescription || '').trim().slice(0, 4000);
     const cleanDate = String(preferredDate || '').trim().slice(0, 32);
+    const cleanProgramTitle = String(programTitle || 'Accompagnement DJIFFA ACADEMY').trim().slice(0, 200);
 
-    if (!cleanName || !cleanEmail || !cleanNeed || !cleanDate) {
-      res.status(400).json({ ok: false, error: 'Informations d’accompagnement incomplètes.' });
+    if (!cleanName || !cleanEmail || !cleanPhone || !cleanNeed || !cleanDate) {
+      res.status(400).json({
+        ok: false,
+        error: 'Veuillez renseigner votre nom, email, téléphone WhatsApp, date souhaitée et description du projet.'
+      });
+      return;
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      res.status(400).json({ ok: false, error: 'Adresse email invalide.' });
       return;
     }
 
     const reqId = `req-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-    const validType = type === 'collective' ? 'collective' : 'individual';
-    const resolvedUserId =
-      caller.userId && /^[0-9a-f-]{36}$/i.test(caller.userId)
-        ? caller.userId
-        : userId && /^[0-9a-f-]{36}$/i.test(String(userId))
-        ? String(userId)
-        : null;
+    const validType: 'individual' | 'collective' = type === 'collective' ? 'collective' : 'individual';
 
     if (supabaseAdmin) {
-      await supabaseAdmin
+      let resolvedUserId: string | null = null;
+      if (caller.userId && /^[0-9a-f-]{36}$/i.test(caller.userId)) {
+        resolvedUserId = await ensureSupabaseProfileForUser(
+          caller.userId,
+          caller.email || cleanEmail,
+          cleanName,
+          cleanPhone
+        );
+      }
+
+      const { data: insertedRow, error: insertErr } = await supabaseAdmin
         .from('coaching_requests')
         .insert({
           id: reqId,
@@ -1131,15 +1350,57 @@ async function startServer() {
           user_email: cleanEmail,
           user_phone: cleanPhone,
           type: validType,
-          program_title: String(programTitle || 'Accompagnement DJIFFA ACADEMY').slice(0, 200),
+          program_title: cleanProgramTitle,
           need_description: cleanNeed,
           preferred_date: cleanDate,
           status: 'pending'
         })
-        .then(() => undefined, () => undefined);
+        .select(STUDENT_COACHING_COLUMNS)
+        .single();
+
+      if (insertErr || !insertedRow) {
+        console.error('[Coaching] Supabase insert error:', insertErr?.code, insertErr?.message);
+        res.status(500).json({
+          ok: false,
+          error:
+            'Impossible d’enregistrer votre demande d’accompagnement dans la base de données. Veuillez réessayer dans un instant.'
+        });
+        return;
+      }
+
+      const mapped = mapCoachingRow(insertedRow, false);
+      res.status(201).json({
+        ok: true,
+        persisted: true,
+        id: mapped.id,
+        request: mapped
+      });
+      return;
     }
 
-    res.json({ ok: true, id: reqId });
+    const localItem: ServerCoachingRequest = {
+      id: reqId,
+      userId: caller.userId || '',
+      userName: cleanName,
+      userEmail: cleanEmail,
+      userPhone: cleanPhone,
+      type: validType,
+      programTitle: cleanProgramTitle,
+      needDescription: cleanNeed,
+      preferredDate: cleanDate,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    };
+    recentCoachingRequests.unshift(localItem);
+    if (recentCoachingRequests.length > 200) recentCoachingRequests.length = 200;
+
+    res.status(201).json({
+      ok: true,
+      persisted: false,
+      localOnly: true,
+      id: localItem.id,
+      request: localItem
+    });
   });
 
   // 3d. Admin-only endpoints for Contact Messages & Payment Events
@@ -3119,7 +3380,7 @@ async function startServer() {
         { data: progress },
         { data: certificates },
         { data: orders },
-        { data: coachingRequests },
+        { data: coachingRequests, error: coachingErr },
         { data: coursePrivateContents }
       ] = await Promise.all([
         supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: false }),
@@ -3131,6 +3392,10 @@ async function startServer() {
         supabaseAdmin.from('course_private_contents').select('*')
       ]);
 
+      if (coachingErr) {
+        console.error('[Admin] coaching_requests fetch error:', coachingErr.code, coachingErr.message);
+      }
+
       res.json({
         ok: true,
         profiles: profiles || [],
@@ -3139,6 +3404,7 @@ async function startServer() {
         certificates: certificates || [],
         orders: orders || [],
         coachingRequests: coachingRequests || [],
+        coachingRequestsError: coachingErr ? coachingErr.message : null,
         coursePrivateContents: coursePrivateContents || []
       });
     } catch (err) {
@@ -3185,23 +3451,36 @@ async function startServer() {
           break;
         }
         case 'update_coaching_status': {
+          const reqId = String(payload?.id || '').trim();
+          const allowedStatuses = new Set(['pending', 'validated', 'scheduled', 'completed', 'cancelled']);
+          const nextStatus = allowedStatuses.has(String(payload?.status)) ? String(payload.status) : 'pending';
+          if (!reqId) {
+            throw new Error('Identifiant de demande d’accompagnement manquant.');
+          }
           const updateExt: Record<string, unknown> = {
-            status: payload?.status,
+            status: nextStatus,
             meeting_link: payload?.meetingLink ?? null,
             admin_notes: payload?.adminNotes ?? null
           };
           const resExt = await supabaseAdmin
             .from('coaching_requests')
             .update(updateExt)
-            .eq('id', String(payload?.id || ''));
-          if (resExt.error && /column|schema cache|42703|PGRST204/i.test(resExt.error.message)) {
-            await supabaseAdmin
-              .from('coaching_requests')
-              .update({
-                status: payload?.status,
-                meeting_link: payload?.meetingLink ?? null
-              })
-              .eq('id', String(payload?.id || ''));
+            .eq('id', reqId);
+          if (resExt.error) {
+            if (/column|schema cache|42703|PGRST204/i.test(resExt.error.message)) {
+              const fallbackRes = await supabaseAdmin
+                .from('coaching_requests')
+                .update({
+                  status: nextStatus,
+                  meeting_link: payload?.meetingLink ?? null
+                })
+                .eq('id', reqId);
+              if (fallbackRes.error) {
+                throw new Error(fallbackRes.error.message);
+              }
+            } else {
+              throw new Error(resExt.error.message);
+            }
           }
           break;
         }

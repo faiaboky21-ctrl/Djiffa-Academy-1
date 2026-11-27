@@ -139,11 +139,29 @@ interface AppContextType {
   // Course actions
   isEnrolled: (courseId: string) => boolean;
   getCourseProgress: (courseId: string) => { completedCount: number; totalCount: number; percentage: number };
+  getCourseCertificateEligibility: (
+    courseId: string,
+    userOverride?: User | null
+  ) => {
+    eligible: boolean;
+    enrolled: boolean;
+    certificateEnabled: boolean;
+    lessonsDone: boolean;
+    completedCount: number;
+    totalCount: number;
+    finalQuizRequired: boolean;
+    finalQuizPassed: boolean;
+    reason?: string;
+  };
   setLastAccessedLesson: (courseId: string, lessonId: string) => void;
   toggleLessonComplete: (courseId: string, lessonId: string) => void;
   submitExercise: (lessonId: string, submissionText: string, link?: string) => void;
   submitQuizResult: (quizId: string, score: number, total: number) => void;
-  claimCertificate: (courseId: string) => UserCertificate | null;
+  claimCertificate: (courseId: string) => Promise<{ ok: boolean; certificate?: UserCertificate; error?: string }>;
+  downloadCertificatePdf: (
+    certificateId: string,
+    verificationCode?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
 
   // Orders & Checkout
   validatePromoCode: (code: string) => PromoCode | null;
@@ -831,22 +849,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }))
           : Promise.resolve(null);
 
+        const serverCertificatesPromise = accessToken
+          ? fetch('/api/student/certificates', {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            })
+              .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => null) }))
+              .catch(() => null)
+          : Promise.resolve(null);
+
         const [
           { data: profile },
           enrollRes,
           { data: progRows },
-          { data: certRows },
           ordersRes,
           serverEnrollData,
-          serverCoachingData
+          serverCoachingData,
+          serverCertificatesData
         ] = await Promise.all([
           supabase.from('profiles').select('*').eq('id', authUserId).maybeSingle(),
           supabase.from('enrollments').select('*').eq('user_id', authUserId),
           supabase.from('lesson_progress').select('*').eq('user_id', authUserId),
-          supabase.from('certificates').select('*').eq('user_id', authUserId),
           supabase.from('orders').select('*').eq('user_id', authUserId).order('created_at', { ascending: false }),
           serverEnrollPromise,
-          serverCoachingPromise
+          serverCoachingPromise,
+          serverCertificatesPromise
         ]);
 
         if (enrollRes.error) {
@@ -887,20 +913,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
 
-        const certificates: UserCertificate[] = (certRows || []).map((c: any) => ({
-          id: c.id,
-          courseId: c.course_id,
-          courseTitle: c.course_title,
-          issuedDate: c.issued_date,
-          studentName: c.student_name,
-          verificationCode: c.verification_code,
-          directorName: c.director_name
-        }));
+        const serverCertificates: UserCertificate[] | null =
+          serverCertificatesData?.ok &&
+          serverCertificatesData.body?.ok &&
+          Array.isArray(serverCertificatesData.body.certificates)
+            ? serverCertificatesData.body.certificates.map((c: any) => ({
+                id: String(c.id),
+                courseId: String(c.courseId || ''),
+                courseTitle: String(c.courseTitle || ''),
+                issuedDate: String(c.issuedDate || ''),
+                studentName: String(c.studentName || ''),
+                verificationCode: String(c.verificationCode || ''),
+                directorName: String(c.directorName || 'Faith Ariola')
+              }))
+            : null;
 
         setCurrentUser((prev) => {
           const preservedEnrolledIds =
             !enrollmentSourceReadable && prev?.id === authUserId ? prev.enrolledCourseIds : [];
           const finalEnrolledIds = Array.from(new Set([...mergedEnrolledIds, ...preservedEnrolledIds]));
+          const preservedCertificates =
+            prev?.id === authUserId ? prev.certificates : [];
           return {
             id: authUserId,
             email: profile?.email || fallbackEmail || prev?.email || '',
@@ -913,7 +946,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             lastAccessedLessonByCourse,
             submittedExercises,
             quizScores,
-            certificates,
+            certificates: serverCertificates !== null ? serverCertificates : preservedCertificates,
             createdAt: profile?.created_at || prev?.createdAt
           };
         });
@@ -1918,10 +1951,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const persistProgressToSupabase = async (updatedUser: User, courseId: string) => {
-    if (!isSupabaseConfigured || !supabase || !isUuid(updatedUser.id)) return;
+  const persistProgressToSupabase = async (updatedUser: User, courseId: string): Promise<boolean> => {
+    if (!isSupabaseConfigured || !supabase || !isUuid(updatedUser.id)) return true;
     try {
-      await supabase.from('lesson_progress').upsert(
+      const { error } = await supabase.from('lesson_progress').upsert(
         {
           user_id: updatedUser.id,
           course_id: courseId,
@@ -1933,8 +1966,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
         { onConflict: 'user_id,course_id' }
       );
+      if (error) {
+        console.warn('Cloud progress sync warning:', error.message);
+        return false;
+      }
+      return true;
     } catch (err) {
       console.warn('Cloud progress sync warning:', err);
+      return false;
     }
   };
 
@@ -1976,7 +2015,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return currentUser.enrolledCourseIds.includes(courseId);
   };
 
-  const getCourseProgress = (courseId: string) => {
+  const getCourseProgress = (courseId: string, userOverride?: User | null) => {
+    const targetUser = userOverride === undefined ? currentUser : userOverride;
     const course = courses.find((c) => c.id === courseId);
     if (!course) return { completedCount: 0, totalCount: 0, percentage: 0 };
 
@@ -1984,12 +2024,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const totalCount = allLessonIds.length;
     if (totalCount === 0) return { completedCount: 0, totalCount: 0, percentage: 0 };
 
-    const completedCount = currentUser
-      ? allLessonIds.filter((id) => currentUser.completedLessonIds.includes(id)).length
+    const completedCount = targetUser
+      ? allLessonIds.filter((id) => targetUser.completedLessonIds.includes(id)).length
       : 0;
 
     const percentage = Math.round((completedCount / totalCount) * 100);
     return { completedCount, totalCount, percentage };
+  };
+
+  const getCourseCertificateEligibility = (courseId: string, userOverride?: User | null) => {
+    const targetUser = userOverride === undefined ? currentUser : userOverride;
+    const course = courses.find((c) => c.id === courseId);
+    if (!targetUser || !course) {
+      return {
+        eligible: false,
+        enrolled: false,
+        certificateEnabled: false,
+        lessonsDone: false,
+        completedCount: 0,
+        totalCount: 0,
+        finalQuizRequired: false,
+        finalQuizPassed: false,
+        reason: 'Formation ou session apprenant introuvable.'
+      };
+    }
+
+    const enrolled = targetUser.role === 'admin' || targetUser.enrolledCourseIds.includes(course.id);
+    const certificateEnabled = Boolean(course.certificateEligible);
+    const { completedCount, totalCount } = getCourseProgress(courseId, targetUser);
+    const lessonsDone = totalCount > 0 && completedCount === totalCount;
+    const finalQuizRequired = Boolean(course.finalQuiz && course.finalQuiz.length > 0);
+    const finalQuizScore = targetUser.quizScores?.[`final-${course.id}`];
+    const finalQuizPassed = !finalQuizRequired ? true : Boolean(finalQuizScore?.passed);
+
+    let reason: string | undefined;
+    if (!certificateEnabled) {
+      reason = 'Cette formation ne délivre pas de certificat.';
+    } else if (!enrolled) {
+      reason = 'Vous devez être inscrit(e) à cette formation pour recevoir son certificat.';
+    } else if (!lessonsDone) {
+      reason = `Progression incomplète (${completedCount}/${totalCount} leçons terminées). Complétez 100 % des leçons pour débloquer votre certificat.`;
+    } else if (finalQuizRequired && !finalQuizPassed) {
+      reason =
+        'Vous avez terminé 100 % des leçons. Réussissez maintenant l’Examen Final du programme (score minimum 70 %) pour générer votre certificat officiel.';
+    }
+
+    return {
+      eligible: Boolean(certificateEnabled && enrolled && lessonsDone && finalQuizPassed),
+      enrolled,
+      certificateEnabled,
+      lessonsDone,
+      completedCount,
+      totalCount,
+      finalQuizRequired,
+      finalQuizPassed,
+      reason
+    };
   };
 
   const setLastAccessedLesson = (courseId: string, lessonId: string) => {
@@ -2003,28 +2093,118 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     };
     setCurrentUser(updatedUser);
-    persistProgressToSupabase(updatedUser, courseId);
+    void persistProgressToSupabase(updatedUser, courseId);
   };
 
-  const persistCertificateToSupabase = async (user: User, cert: UserCertificate) => {
-    if (!isSupabaseConfigured || !supabase || !isUuid(user.id)) return;
-    try {
-      await supabase.from('certificates').upsert(
-        {
-          id: cert.id,
-          user_id: user.id,
-          course_id: cert.courseId,
-          course_title: cert.courseTitle,
-          student_name: cert.studentName,
-          director_name: cert.directorName,
-          verification_code: cert.verificationCode,
-          issued_date: cert.issuedDate
-        },
-        { onConflict: 'user_id,course_id' }
-      );
-    } catch (err) {
-      console.warn('Certificate cloud sync warning:', err);
+  const issueCertificateOnServer = async (
+    targetUser: User,
+    courseId: string
+  ): Promise<{ ok: boolean; certificate?: UserCertificate; error?: string }> => {
+    const synced = await persistProgressToSupabase(targetUser, courseId);
+    if (!synced) {
+      return {
+        ok: false,
+        error: 'Impossible de synchroniser votre progression avant la délivrance du certificat.'
+      };
     }
+
+    const accessToken = await getSupabaseAccessToken();
+    if (!accessToken) {
+      return { ok: false, error: 'Session expirée. Veuillez vous reconnecter.' };
+    }
+
+    try {
+      const res = await fetch('/api/student/certificates/issue', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({ courseId })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok || !data.certificate) {
+        return {
+          ok: false,
+          error: data?.error || 'Conditions d’obtention du certificat non encore remplies.'
+        };
+      }
+
+      const issuedCert: UserCertificate = {
+        id: String(data.certificate.id),
+        courseId: String(data.certificate.courseId),
+        courseTitle: String(data.certificate.courseTitle),
+        issuedDate: String(data.certificate.issuedDate),
+        studentName: String(data.certificate.studentName),
+        verificationCode: String(data.certificate.verificationCode),
+        directorName: String(data.certificate.directorName || 'Faith Ariola')
+      };
+
+      setCurrentUser((prev) => {
+        if (!prev || prev.id !== targetUser.id) return prev;
+        if (prev.certificates.some((c) => c.courseId === issuedCert.courseId)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          certificates: [issuedCert, ...prev.certificates]
+        };
+      });
+
+      if (!data.alreadyIssued) {
+        pushNotification(
+          targetUser.id,
+          'Certificat débloqué !',
+          `Vous avez validé « ${issuedCert.courseTitle} ». Votre certificat PDF officiel (${issuedCert.verificationCode}) est disponible.`,
+          'progress'
+        );
+      }
+
+      return { ok: true, certificate: issuedCert };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur réseau lors de la délivrance du certificat.'
+      };
+    }
+  };
+
+  const maybeAutoIssueCertificate = (updatedUser: User, courseId: string) => {
+    const course = courses.find((c) => c.id === courseId);
+    if (!course) return;
+    if (updatedUser.certificates.some((cert) => cert.courseId === courseId)) return;
+
+    const eligibility = getCourseCertificateEligibility(courseId, updatedUser);
+    if (!eligibility.eligible) return;
+
+    if (isSupabaseConfigured && isUuid(updatedUser.id)) {
+      void issueCertificateOnServer(updatedUser, courseId);
+      return;
+    }
+
+    const newCert: UserCertificate = {
+      id: `cert-${Date.now()}`,
+      courseId: course.id,
+      courseTitle: course.title,
+      issuedDate: new Date().toISOString().split('T')[0],
+      studentName: updatedUser.name,
+      verificationCode: `DJF-CERT-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`,
+      directorName: siteSettings.directorName || 'Faith Ariola'
+    };
+    setCurrentUser((prev) => {
+      if (!prev || prev.id !== updatedUser.id) return prev;
+      if (prev.certificates.some((c) => c.courseId === course.id)) return prev;
+      return {
+        ...prev,
+        certificates: [newCert, ...prev.certificates]
+      };
+    });
+    pushNotification(
+      updatedUser.id,
+      'Certificat débloqué !',
+      `Vous avez complété « ${course.title} ». Votre certificat est disponible.`,
+      'progress'
+    );
   };
 
   const toggleLessonComplete = (courseId: string, lessonId: string) => {
@@ -2039,35 +2219,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       completedLessonIds: updatedCompleted
     };
 
-    const course = courses.find((c) => c.id === courseId);
-    if (course && course.certificateEligible) {
-      const allLessonIds = course.modules.flatMap((m) => m.lessons.map((l) => l.id));
-      const allDone = allLessonIds.length > 0 && allLessonIds.every((id) => updatedCompleted.includes(id));
-      const alreadyHasCert = updatedUser.certificates.some((cert) => cert.courseId === courseId);
-
-      if (allDone && !alreadyHasCert) {
-        const newCert: UserCertificate = {
-          id: `cert-${Date.now()}`,
-          courseId: course.id,
-          courseTitle: course.title,
-          issuedDate: new Date().toISOString().split('T')[0],
-          studentName: updatedUser.name,
-          verificationCode: `DJIFFA-ACADEMY-${Date.now().toString().slice(-6)}`,
-          directorName: 'Faith Ariola'
-        };
-        updatedUser.certificates.push(newCert);
-        persistCertificateToSupabase(updatedUser, newCert);
-        pushNotification(
-          updatedUser.id,
-          'Certificat débloqué !',
-          `Vous avez complété 100% de « ${course.title} ». Votre certificat est disponible.`,
-          'progress'
-        );
-      }
-    }
-
     setCurrentUser(updatedUser);
-    persistProgressToSupabase(updatedUser, courseId);
+    if (isSupabaseConfigured && isUuid(updatedUser.id)) {
+      const eligibility = getCourseCertificateEligibility(courseId, updatedUser);
+      const alreadyHasCert = updatedUser.certificates.some((cert) => cert.courseId === courseId);
+      if (eligibility.eligible && !alreadyHasCert) {
+        void issueCertificateOnServer(updatedUser, courseId);
+        return;
+      }
+      void persistProgressToSupabase(updatedUser, courseId);
+    } else {
+      maybeAutoIssueCertificate(updatedUser, courseId);
+    }
   };
 
   const submitExercise = (lessonId: string, submissionText: string, link?: string) => {
@@ -2087,7 +2250,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(updatedUser);
     const matchedCourse = courses.find((c) => c.modules.some((m) => m.lessons.some((l) => l.id === lessonId)));
     if (matchedCourse) {
-      persistProgressToSupabase(updatedUser, matchedCourse.id);
+      void persistProgressToSupabase(updatedUser, matchedCourse.id);
     }
   };
 
@@ -2113,20 +2276,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         c.modules.some((m) => m.lessons.some((l) => l.id === quizId))
     );
     if (matchedCourse) {
-      persistProgressToSupabase(updatedUser, matchedCourse.id);
+      if (isSupabaseConfigured && isUuid(updatedUser.id)) {
+        const eligibility = getCourseCertificateEligibility(matchedCourse.id, updatedUser);
+        const alreadyHasCert = updatedUser.certificates.some((cert) => cert.courseId === matchedCourse.id);
+        if (eligibility.eligible && !alreadyHasCert) {
+          void issueCertificateOnServer(updatedUser, matchedCourse.id);
+          return;
+        }
+        void persistProgressToSupabase(updatedUser, matchedCourse.id);
+      } else {
+        maybeAutoIssueCertificate(updatedUser, matchedCourse.id);
+      }
     }
   };
 
-  const claimCertificate = (courseId: string): UserCertificate | null => {
-    if (!currentUser) return null;
+  const claimCertificate = async (
+    courseId: string
+  ): Promise<{ ok: boolean; certificate?: UserCertificate; error?: string }> => {
+    if (!currentUser) {
+      return { ok: false, error: 'Veuillez vous connecter à votre compte apprenant.' };
+    }
     const existing = currentUser.certificates.find((c) => c.courseId === courseId);
-    if (existing) return existing;
+    if (existing) {
+      return { ok: true, certificate: existing };
+    }
+
+    const eligibility = getCourseCertificateEligibility(courseId, currentUser);
+    if (!eligibility.eligible) {
+      return {
+        ok: false,
+        error: eligibility.reason || 'Conditions d’obtention du certificat non encore remplies.'
+      };
+    }
+
+    if (isSupabaseConfigured && supabase && isUuid(currentUser.id)) {
+      return issueCertificateOnServer(currentUser, courseId);
+    }
 
     const course = courses.find((c) => c.id === courseId);
-    if (!course || !course.certificateEligible) return null;
-
-    const progress = getCourseProgress(courseId);
-    if ((progress.totalCount === 0 || progress.percentage < 100) && currentUser.role !== 'admin') return null;
+    if (!course) {
+      return { ok: false, error: 'Formation introuvable.' };
+    }
 
     const newCert: UserCertificate = {
       id: `cert-${Date.now()}`,
@@ -2134,17 +2324,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       courseTitle: course.title,
       issuedDate: new Date().toISOString().split('T')[0],
       studentName: currentUser.name,
-      verificationCode: `DJIFFA-ACADEMY-${Math.floor(100000 + Math.random() * 900000)}`,
-      directorName: 'Faith Ariola'
+      verificationCode: `DJF-CERT-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`,
+      directorName: siteSettings.directorName || 'Faith Ariola'
     };
 
-    const updatedUser = {
-      ...currentUser,
-      certificates: [...currentUser.certificates, newCert]
-    };
-    setCurrentUser(updatedUser);
-    persistCertificateToSupabase(updatedUser, newCert);
-    return newCert;
+    setCurrentUser((prev) => {
+      if (!prev || prev.id !== currentUser.id) return prev;
+      if (prev.certificates.some((c) => c.courseId === courseId)) return prev;
+      return {
+        ...prev,
+        certificates: [newCert, ...prev.certificates]
+      };
+    });
+    return { ok: true, certificate: newCert };
+  };
+
+  const downloadCertificatePdf = async (
+    certificateId: string,
+    verificationCode?: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const supabaseToken = await getSupabaseAccessToken();
+    const bearer = supabaseToken || adminToken;
+    if (!bearer) {
+      return {
+        ok: false,
+        error: 'Session authentifiée requise pour télécharger le certificat PDF officiel.'
+      };
+    }
+
+    try {
+      const res = await fetch(`/api/student/certificates/${encodeURIComponent(certificateId)}/pdf`, {
+        headers: {
+          Authorization: `Bearer ${bearer}`
+        }
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        return {
+          ok: false,
+          error: errBody?.error || 'Impossible de générer le fichier PDF du certificat.'
+        };
+      }
+
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const nameMatch = /filename="?([^";\n]+)"?/i.exec(disposition);
+      const safeCode = (verificationCode || certificateId).replace(/[^A-Za-z0-9_-]/g, '-');
+      const fileName = nameMatch?.[1] || `Certificat-${safeCode}.pdf`;
+
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur réseau lors du téléchargement du PDF.'
+      };
+    }
   };
 
   const validatePromoCode = (code: string): PromoCode | null => {
@@ -2826,11 +3070,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         logout,
         isEnrolled,
         getCourseProgress,
+        getCourseCertificateEligibility,
         setLastAccessedLesson,
         toggleLessonComplete,
         submitExercise,
         submitQuizResult,
         claimCertificate,
+        downloadCertificatePdf,
         validatePromoCode,
         processPurchase,
         verifyExistingPayment,

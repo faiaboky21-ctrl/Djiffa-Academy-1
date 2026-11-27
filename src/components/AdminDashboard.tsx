@@ -45,7 +45,10 @@ import {
   Search,
   Sparkles,
   ExternalLink,
-  Bell
+  Bell,
+  Award,
+  Download,
+  Loader2
 } from 'lucide-react';
 
 type AdminTab =
@@ -105,6 +108,7 @@ export const AdminDashboard: React.FC = () => {
     updateContactMessageStatus,
     grantManualCourseAccess,
     revokeCourseAccess,
+    downloadCertificatePdf,
     refreshServerPaymentStatus,
     migrateLocalCatalogToCloud,
     refreshSupabaseAdminData,
@@ -117,6 +121,8 @@ export const AdminDashboard: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [downloadingAdminCertId, setDownloadingAdminCertId] = useState<string | null>(null);
+  const [adminCertError, setAdminCertError] = useState<string | null>(null);
 
   // Course editing state
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
@@ -285,6 +291,25 @@ export const AdminDashboard: React.FC = () => {
       (s.country && s.country.toLowerCase().includes(q))
     );
   });
+
+  const deliveredCertificates = students
+    .flatMap((stu) =>
+      (stu.certificates || []).map((cert) => ({
+        ...cert,
+        studentEmail: stu.email
+      }))
+    )
+    .filter((cert) => {
+      if (!studentSearch.trim()) return true;
+      const q = studentSearch.toLowerCase();
+      return (
+        cert.studentName.toLowerCase().includes(q) ||
+        cert.studentEmail.toLowerCase().includes(q) ||
+        cert.courseTitle.toLowerCase().includes(q) ||
+        cert.verificationCode.toLowerCase().includes(q)
+      );
+    })
+    .sort((a, b) => String(b.issuedDate || '').localeCompare(String(a.issuedDate || '')));
 
   const filteredOrders = orders.filter((o) => {
     if (orderStatusFilter === 'all') return true;
@@ -1091,6 +1116,88 @@ export const AdminDashboard: React.FC = () => {
                     </div>
                   </div>
                 ))
+              )}
+            </div>
+
+            {/* Issued Certificates Registry (Admin Read + PDF Export) */}
+            <div className="pt-6 border-t border-zinc-800 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-brand text-lg font-bold text-slate-100 flex items-center gap-2">
+                    <Award className="w-5 h-5 text-[#D4AF37]" />
+                    <span>Certificats Officiels Délivrés ({deliveredCertificates.length})</span>
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    Registre vérifié des certificats attribués aux apprenants ayant complété leur cursus.
+                  </p>
+                </div>
+              </div>
+
+              {adminCertError && (
+                <div className="p-3 rounded-xl bg-red-950/60 border border-red-700/70 text-xs text-red-200 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{adminCertError}</span>
+                </div>
+              )}
+
+              {deliveredCertificates.length === 0 ? (
+                <div className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 text-center">
+                  Aucun certificat officiel délivré pour le moment.
+                </div>
+              ) : (
+                <div className="rounded-2xl bg-zinc-950 border border-zinc-800 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-zinc-900/80 text-zinc-400 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                        <tr>
+                          <th className="p-3.5">Apprenant</th>
+                          <th className="p-3.5">Formation</th>
+                          <th className="p-3.5">Code unique</th>
+                          <th className="p-3.5">Date</th>
+                          <th className="p-3.5 text-right">PDF</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-900">
+                        {deliveredCertificates.map((cert) => (
+                          <tr key={cert.id} className="hover:bg-zinc-900/40">
+                            <td className="p-3.5">
+                              <span className="font-semibold text-slate-100 block">{cert.studentName}</span>
+                              <span className="text-[11px] text-zinc-500">{cert.studentEmail}</span>
+                            </td>
+                            <td className="p-3.5 text-zinc-200">{cert.courseTitle}</td>
+                            <td className="p-3.5 font-mono text-[#D4AF37] font-semibold">
+                              {cert.verificationCode}
+                            </td>
+                            <td className="p-3.5 text-zinc-400 whitespace-nowrap">{cert.issuedDate}</td>
+                            <td className="p-3.5 text-right">
+                              <button
+                                type="button"
+                                disabled={downloadingAdminCertId === cert.id}
+                                onClick={async () => {
+                                  setDownloadingAdminCertId(cert.id);
+                                  setAdminCertError(null);
+                                  const res = await downloadCertificatePdf(cert.id, cert.verificationCode);
+                                  setDownloadingAdminCertId(null);
+                                  if (!res.ok) {
+                                    setAdminCertError(res.error || 'Erreur lors du téléchargement PDF.');
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-[#D4AF37] hover:text-zinc-950 border border-[#D4AF37]/40 text-[#F3E5AB] font-semibold text-[11px] transition-colors cursor-pointer disabled:opacity-60"
+                              >
+                                {downloadingAdminCertId === cert.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                <span>PDF</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               )}
             </div>
           </div>

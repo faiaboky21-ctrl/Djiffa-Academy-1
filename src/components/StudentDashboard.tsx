@@ -44,6 +44,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
     markNotificationRead,
     navigateTo,
     getCourseProgress,
+    getCourseCertificateEligibility,
+    downloadCertificatePdf,
     updateUserProfile,
     syncCurrentStudentToCloud,
     openAuthModal,
@@ -60,6 +62,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
   const [profileSaved, setProfileSaved] = useState(false);
   const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null);
   const [resourceStatus, setResourceStatus] = useState<string | null>(null);
+  const [downloadingCertId, setDownloadingCertId] = useState<string | null>(null);
+  const [certFeedback, setCertFeedback] = useState<{ type: 'ok' | 'error'; message: string } | null>(null);
 
   useEffect(() => {
     if (currentUser) {
@@ -595,7 +599,75 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
         {/* Tab 4: Certificates */}
         {activeTab === 'certificates' && (
           <div className="space-y-6">
-            <h2 className="font-brand text-xl font-bold text-slate-100">Mes Certificats Officiels</h2>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <h2 className="font-brand text-xl font-bold text-slate-100">Mes Certificats Officiels</h2>
+              <span className="text-xs text-zinc-400">
+                Format PDF A4 paysage · Signé par {siteSettings.directorName}
+              </span>
+            </div>
+
+            {certFeedback && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                  certFeedback.type === 'ok'
+                    ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+                    : 'bg-amber-950/60 border-amber-700 text-amber-200'
+                }`}
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{certFeedback.message}</span>
+              </div>
+            )}
+
+            {(() => {
+              const claimableOrPendingCourses = enrolledCourses.filter(
+                (c) =>
+                  c.certificateEligible &&
+                  !currentUser.certificates.some((cert) => cert.courseId === c.id) &&
+                  getCourseProgress(c.id).percentage === 100
+              );
+              if (claimableOrPendingCourses.length === 0) return null;
+              return (
+                <div className="space-y-3">
+                  {claimableOrPendingCourses.map((c) => {
+                    const elig = getCourseCertificateEligibility(c.id);
+                    return (
+                      <div
+                        key={c.id}
+                        className="p-4 rounded-xl bg-zinc-950 border border-[#D4AF37]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <span className="font-brand font-bold text-slate-100 block">{c.title}</span>
+                          <span className="text-zinc-400">
+                            {elig.eligible
+                              ? 'Toutes les conditions sont remplies : vous pouvez générer votre certificat officiel.'
+                              : elig.reason}
+                          </span>
+                        </div>
+                        {elig.eligible ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenCertificateModal(c.id)}
+                            className="px-4 py-2 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs shrink-0 cursor-pointer"
+                          >
+                            Générer mon Certificat
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => navigateTo('player', c.id)}
+                            className="px-4 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-[#D4AF37]/40 text-[#F3E5AB] font-semibold text-xs shrink-0 cursor-pointer"
+                          >
+                            Accéder à la formation
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
             {currentUser.certificates.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {currentUser.certificates.map((cert) => (
@@ -604,36 +676,66 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                     className="p-6 rounded-2xl bg-zinc-950 border border-[#D4AF37]/40 shadow-xl space-y-4"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-[#D4AF37]/20 border border-[#D4AF37] flex items-center justify-center text-[#D4AF37]">
+                      <div className="w-10 h-10 rounded-full bg-[#D4AF37]/20 border border-[#D4AF37] flex items-center justify-center text-[#D4AF37] shrink-0">
                         <Award className="w-5 h-5" />
                       </div>
                       <div>
                         <span className="text-[10px] uppercase tracking-wider text-[#D4AF37] font-semibold block">
-                          Certificat d’Excellence
+                          Certificat d’Accomplissement
                         </span>
                         <h3 className="font-brand text-base font-bold text-slate-100">{cert.courseTitle}</h3>
                       </div>
                     </div>
                     <div className="p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-xs space-y-1">
-                      <div className="flex justify-between text-zinc-400">
+                      <div className="flex justify-between gap-2 text-zinc-400">
                         <span>Délivré à :</span>
-                        <span className="text-slate-200 font-semibold">{cert.studentName}</span>
+                        <span className="text-slate-200 font-semibold text-right">{cert.studentName}</span>
                       </div>
-                      <div className="flex justify-between text-zinc-400">
+                      <div className="flex justify-between gap-2 text-zinc-400">
                         <span>Date :</span>
                         <span className="text-slate-200">{cert.issuedDate}</span>
                       </div>
-                      <div className="flex justify-between text-zinc-400">
-                        <span>Code de vérification :</span>
-                        <span className="font-mono text-[#D4AF37]">{cert.verificationCode}</span>
+                      <div className="flex justify-between gap-2 text-zinc-400">
+                        <span>Numéro unique :</span>
+                        <span className="font-mono text-[#D4AF37] font-semibold">{cert.verificationCode}</span>
                       </div>
                     </div>
-                    <button
-                      onClick={() => onOpenCertificateModal(cert.courseId)}
-                      className="w-full py-2.5 px-4 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase cursor-pointer"
-                    >
-                      Afficher & Télécharger le Certificat
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2.5">
+                      <button
+                        type="button"
+                        disabled={downloadingCertId === cert.id}
+                        onClick={async () => {
+                          setDownloadingCertId(cert.id);
+                          setCertFeedback(null);
+                          const res = await downloadCertificatePdf(cert.id, cert.verificationCode);
+                          setDownloadingCertId(null);
+                          if (res.ok) {
+                            setCertFeedback({
+                              type: 'ok',
+                              message: `Certificat « ${cert.verificationCode} » téléchargé en PDF.`
+                            });
+                          } else {
+                            setCertFeedback({
+                              type: 'error',
+                              message: res.error || 'Ouvrez l’aperçu pour imprimer ou enregistrer en PDF.'
+                            });
+                          }
+                        }}
+                        className="flex-1 py-2.5 px-4 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-xs uppercase flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>
+                          {downloadingCertId === cert.id ? 'Téléchargement...' : 'Télécharger PDF'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenCertificateModal(cert.courseId)}
+                        className="py-2.5 px-4 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-slate-200 font-semibold text-xs uppercase cursor-pointer"
+                      >
+                        Aperçu
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -643,8 +745,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onOpenCertif
                 <h3 className="font-brand text-base font-bold text-slate-200">
                   Aucun certificat obtenu pour l’instant
                 </h3>
-                <p className="text-xs text-zinc-400 max-w-sm mx-auto">
-                  Complétez 100% des leçons d’une formation pour recevoir automatiquement votre certificat vérifié.
+                <p className="text-xs text-zinc-400 max-w-md mx-auto">
+                  Complétez 100 % des leçons et validez l’examen final d’une formation pour débloquer automatiquement votre certificat officiel téléchargeable en PDF.
                 </p>
               </div>
             )}

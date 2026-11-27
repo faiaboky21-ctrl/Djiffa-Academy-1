@@ -54,7 +54,8 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
     setLastAccessedLesson,
     submitExercise,
     submitQuizResult,
-    getCourseProgress
+    getCourseProgress,
+    getCourseCertificateEligibility
   } = useApp();
 
   const course = courses.find((c) => c.id === courseId) || courses[0];
@@ -248,6 +249,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
 
   const isCompleted = currentUser ? currentUser.completedLessonIds.includes(currentLesson.id) : false;
   const progress = getCourseProgress(course.id);
+  const certEligibility = getCourseCertificateEligibility(course.id);
 
   const handleNextLesson = () => {
     if (currentLessonIndex < allLessons.length - 1) {
@@ -409,7 +411,7 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
             </div>
           </div>
 
-          {progress.percentage === 100 && course.certificateEligible && (
+          {course.certificateEligible && certEligibility.eligible && (
             <button
               onClick={() => onOpenCertificateModal(course.id)}
               className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-zinc-950 font-bold text-[11px] sm:text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
@@ -419,6 +421,24 @@ export const CoursePlayer: React.FC<CoursePlayerProps> = ({
               <span className="hidden sm:inline">Officiel</span>
             </button>
           )}
+
+          {course.certificateEligible &&
+            !certEligibility.eligible &&
+            progress.percentage === 100 &&
+            certEligibility.finalQuizRequired &&
+            !certEligibility.finalQuizPassed && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('final-quiz');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-amber-950/70 border border-[#D4AF37]/60 text-[#F3E5AB] font-semibold text-[11px] sm:text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Award className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>Examen Final Requis</span>
+              </button>
+            )}
 
           <button
             onClick={handleToggleComplete}

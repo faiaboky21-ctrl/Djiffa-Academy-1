@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { generateCertificatePdfBuffer } from './server/certificatePdf.ts';
 
 dotenv.config();
 
@@ -78,10 +79,57 @@ interface ServerCoachingRequest {
   createdAt: string;
 }
 
+interface ServerCertificate {
+  id: string;
+  userId: string;
+  courseId: string;
+  courseTitle: string;
+  issuedDate: string;
+  studentName: string;
+  verificationCode: string;
+  directorName: string;
+  createdAt?: string;
+}
+
 const recentPaymentEvents: ServerPaymentEvent[] = [];
 const recentContactMessages: ServerContactMessage[] = [];
 const recentCoachingRequests: ServerCoachingRequest[] = [];
+const recentCertificates: ServerCertificate[] = [];
 let lastInvalidWebhookLogAt = 0;
+
+function mapCertificateRow(r: any): ServerCertificate {
+  return {
+    id: String(r.id),
+    userId: r.user_id ? String(r.user_id) : '',
+    courseId: String(r.course_id || ''),
+    courseTitle: String(r.course_title || ''),
+    issuedDate: r.issued_date ? String(r.issued_date) : new Date().toISOString().split('T')[0],
+    studentName: String(r.student_name || ''),
+    verificationCode: String(r.verification_code || ''),
+    directorName: String(r.director_name || 'Faith Ariola'),
+    createdAt: r.created_at ? String(r.created_at) : undefined
+  };
+}
+
+function generateUniqueCertificateCode(): string {
+  return `DJF-CERT-${new Date().getFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+function extractLessonIdsFromModules(modules: unknown): string[] {
+  if (!Array.isArray(modules)) return [];
+  const ids: string[] = [];
+  for (const mod of modules) {
+    const lessons = (mod as { lessons?: unknown })?.lessons;
+    if (!Array.isArray(lessons)) continue;
+    for (const les of lessons) {
+      const id = (les as { id?: unknown })?.id;
+      if (typeof id === 'string' && id.trim()) {
+        ids.push(id.trim());
+      }
+    }
+  }
+  return Array.from(new Set(ids));
+}
 
 const STUDENT_COACHING_COLUMNS =
   'id, user_id, user_name, user_email, user_phone, type, program_title, need_description, preferred_date, status, meeting_link, created_at';
@@ -1243,6 +1291,461 @@ async function startServer() {
       res.status(500).json({
         ok: false,
         error: err instanceof Error ? err.message : 'Erreur lecture des demandes d’accompagnement.'
+      });
+    }
+  });
+
+  // 3a-ter. Authenticated Student Certificates: List, Verified Server-Side Issuance & A4 PDF Download
+  app.get('/api/student/certificates', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.userId) {
+      res.status(401).json({ ok: false, error: 'Authentification apprenant requise.' });
+      return;
+    }
+
+    if (!supabaseAdmin) {
+      const localCerts = recentCertificates.filter((c) => c.userId === caller.userId);
+      res.json({ ok: true, localOnly: true, certificates: localCerts });
+      return;
+    }
+
+    try {
+      const lookupUserIds = await resolveCallerLookupIds(caller.userId, caller.email);
+      const idList = Array.from(lookupUserIds);
+      if (idList.length === 0) {
+        res.json({ ok: true, certificates: [] });
+        return;
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('certificates')
+        .select('*')
+        .in('user_id', idList)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        res.status(500).json({
+          ok: false,
+          error: `Impossible de lire vos certificats (${error.message}).`
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        certificates: (data || []).map(mapCertificateRow)
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur lecture des certificats.'
+      });
+    }
+  });
+
+  app.post('/api/student/certificates/issue', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.userId) {
+      res.status(401).json({ ok: false, error: 'Authentification apprenant requise.' });
+      return;
+    }
+
+    const cleanCourseId = String(req.body?.courseId || '').trim();
+    if (!cleanCourseId) {
+      res.status(400).json({ ok: false, error: 'Identifiant de formation requis.' });
+      return;
+    }
+
+    if (!supabaseAdmin) {
+      res.status(503).json({
+        ok: false,
+        notConfigured: true,
+        error: 'Base Supabase serveur non configurée pour l’émission vérifiée des certificats.'
+      });
+      return;
+    }
+
+    if (!/^[0-9a-f-]{36}$/i.test(caller.userId)) {
+      res.status(400).json({
+        ok: false,
+        error: 'Un compte apprenant Supabase authentifié est requis pour générer un certificat nominatif.'
+      });
+      return;
+    }
+
+    try {
+      const lookupUserIds = await resolveCallerLookupIds(caller.userId, caller.email);
+      const targetProfileId =
+        (await ensureSupabaseProfileForUser(caller.userId, caller.email)) || caller.userId;
+      if (/^[0-9a-f-]{36}$/i.test(targetProfileId)) {
+        lookupUserIds.add(targetProfileId);
+      }
+      const idList = Array.from(lookupUserIds);
+
+      // 1. Never overwrite an already-issued certificate for (user, course)
+      const { data: existingRows, error: existingErr } = await supabaseAdmin
+        .from('certificates')
+        .select('*')
+        .in('user_id', idList)
+        .eq('course_id', cleanCourseId)
+        .order('created_at', { ascending: true })
+        .limit(1);
+
+      if (existingErr) {
+        res.status(500).json({
+          ok: false,
+          error: `Erreur vérification certificat existant (${existingErr.message}).`
+        });
+        return;
+      }
+
+      if (existingRows && existingRows.length > 0) {
+        res.json({
+          ok: true,
+          alreadyIssued: true,
+          certificate: mapCertificateRow(existingRows[0])
+        });
+        return;
+      }
+
+      // 2. Load course & private exam definition from Supabase
+      const [{ data: courseRow, error: courseErr }, { data: privRow, error: privErr }] = await Promise.all([
+        supabaseAdmin
+          .from('courses')
+          .select('id, title, certificate_eligible, syllabus_modules')
+          .eq('id', cleanCourseId)
+          .maybeSingle(),
+        supabaseAdmin
+          .from('course_private_contents')
+          .select('*')
+          .eq('course_id', cleanCourseId)
+          .maybeSingle()
+      ]);
+
+      if (courseErr) {
+        res.status(500).json({ ok: false, error: `Erreur lecture formation (${courseErr.message}).` });
+        return;
+      }
+      if (!courseRow) {
+        res.status(404).json({ ok: false, error: 'Formation introuvable dans la base Supabase.' });
+        return;
+      }
+      if (!courseRow.certificate_eligible) {
+        res.status(400).json({ ok: false, error: 'Cette formation ne délivre pas de certificat.' });
+        return;
+      }
+
+      // 3. Verify genuine enrollment (unless verified admin)
+      if (!caller.isAdmin) {
+        const { data: enrollRows, error: enrollErr } = await supabaseAdmin
+          .from('enrollments')
+          .select('id')
+          .in('user_id', idList)
+          .eq('course_id', cleanCourseId)
+          .limit(1);
+
+        if (enrollErr) {
+          res.status(500).json({ ok: false, error: `Erreur vérification inscription (${enrollErr.message}).` });
+          return;
+        }
+        if (!enrollRows || enrollRows.length === 0) {
+          res.status(403).json({
+            ok: false,
+            error: 'Accès non confirmé : vous devez être inscrit(e) à cette formation pour obtenir son certificat.'
+          });
+          return;
+        }
+      }
+
+      // 4. Determine required lessons & mandatory final quiz from DB
+      const privateLessonIds =
+        !privErr && privRow ? extractLessonIdsFromModules(privRow.modules_payload) : [];
+      const publicLessonIds = extractLessonIdsFromModules(courseRow.syllabus_modules);
+      const requiredLessonIds = privateLessonIds.length > 0 ? privateLessonIds : publicLessonIds;
+
+      if (requiredLessonIds.length === 0) {
+        res.status(400).json({
+          ok: false,
+          error: 'Le programme de cette formation ne contient aucune leçon validable.'
+        });
+        return;
+      }
+
+      const finalQuizQuestions =
+        !privErr && privRow && Array.isArray(privRow.final_quiz) ? privRow.final_quiz : [];
+      const finalQuizRequired = finalQuizQuestions.length > 0;
+
+      // 5. Read authentic student progress from lesson_progress
+      const { data: progressRows, error: progressErr } = await supabaseAdmin
+        .from('lesson_progress')
+        .select('course_id, completed_lesson_ids, quiz_scores')
+        .in('user_id', idList);
+
+      if (progressErr) {
+        res.status(500).json({
+          ok: false,
+          error: `Erreur vérification progression (${progressErr.message}).`
+        });
+        return;
+      }
+
+      const completedLessonSet = new Set<string>();
+      const mergedQuizScores: Record<string, { score?: number; total?: number; passed?: boolean }> = {};
+
+      (progressRows || []).forEach((pr: any) => {
+        if (Array.isArray(pr.completed_lesson_ids)) {
+          pr.completed_lesson_ids.forEach((lid: unknown) => {
+            if (typeof lid === 'string' && lid.trim()) completedLessonSet.add(lid.trim());
+          });
+        }
+        if (pr.quiz_scores && typeof pr.quiz_scores === 'object') {
+          Object.entries(pr.quiz_scores).forEach(([qKey, qVal]) => {
+            if (qVal && typeof qVal === 'object') {
+              const prev = mergedQuizScores[qKey];
+              const candidate = qVal as { score?: number; total?: number; passed?: boolean };
+              // Prefer passed entry if multiple progress rows exist
+              if (!prev || (!prev.passed && candidate.passed)) {
+                mergedQuizScores[qKey] = candidate;
+              }
+            }
+          });
+        }
+      });
+
+      const completedCount = requiredLessonIds.filter((id) => completedLessonSet.has(id)).length;
+      const allLessonsDone = completedCount === requiredLessonIds.length;
+
+      const finalScoreEntry = mergedQuizScores[`final-${cleanCourseId}`];
+      const finalQuizPassed = !finalQuizRequired
+        ? true
+        : Boolean(
+            finalScoreEntry &&
+              (finalScoreEntry.passed === true ||
+                (Number(finalScoreEntry.total) > 0 &&
+                  Number(finalScoreEntry.score) / Number(finalScoreEntry.total) >= 0.7))
+          );
+
+      if (!allLessonsDone) {
+        res.status(400).json({
+          ok: false,
+          error: `Progression incomplète (${completedCount}/${requiredLessonIds.length} leçons terminées). Complétez 100 % des leçons pour débloquer votre certificat.`,
+          details: {
+            completedCount,
+            totalCount: requiredLessonIds.length,
+            finalQuizRequired,
+            finalQuizPassed
+          }
+        });
+        return;
+      }
+
+      if (finalQuizRequired && !finalQuizPassed) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Vous avez complété 100 % des leçons, mais vous devez également réussir l’Examen Final du programme (score minimum 70 %) avant de générer votre certificat.',
+          details: {
+            completedCount,
+            totalCount: requiredLessonIds.length,
+            finalQuizRequired: true,
+            finalQuizPassed: false
+          }
+        });
+        return;
+      }
+
+      // 6. Resolve official profile name & director name from DB (never invent data)
+      const [{ data: profileRow }, { data: settingsRow }] = await Promise.all([
+        supabaseAdmin.from('profiles').select('id, name, email').eq('id', targetProfileId).maybeSingle(),
+        supabaseAdmin.from('site_settings').select('*').eq('id', 'default').maybeSingle()
+      ]);
+
+      const studentFullName =
+        String(profileRow?.name || '').trim() || String(caller.email || profileRow?.email || '').trim();
+      if (!studentFullName) {
+        res.status(400).json({
+          ok: false,
+          error: 'Nom complet introuvable sur votre profil. Renseignez votre nom dans « Mes Informations ».'
+        });
+        return;
+      }
+
+      const directorName = String(settingsRow?.director_name || '').trim() || 'Faith Ariola';
+      const issuedDate = new Date().toISOString().split('T')[0];
+
+      // 7. Insert unique certificate row (never overwrite existing)
+      let insertedCert: any = null;
+      let lastInsertError: any = null;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const certId = `cert-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        const verificationCode = generateUniqueCertificateCode();
+
+        const { data: created, error: insertErr } = await supabaseAdmin
+          .from('certificates')
+          .insert({
+            id: certId,
+            user_id: targetProfileId,
+            course_id: cleanCourseId,
+            course_title: String(courseRow.title),
+            student_name: studentFullName,
+            director_name: directorName,
+            verification_code: verificationCode,
+            issued_date: issuedDate
+          })
+          .select('*')
+          .single();
+
+        if (!insertErr && created) {
+          insertedCert = created;
+          break;
+        }
+
+        lastInsertError = insertErr;
+
+        // If race condition created (user_id, course_id) concurrently, return existing row untouched
+        if (insertErr?.code === '23505') {
+          const { data: racedRows } = await supabaseAdmin
+            .from('certificates')
+            .select('*')
+            .in('user_id', idList)
+            .eq('course_id', cleanCourseId)
+            .limit(1);
+          if (racedRows && racedRows.length > 0) {
+            res.json({
+              ok: true,
+              alreadyIssued: true,
+              certificate: mapCertificateRow(racedRows[0])
+            });
+            return;
+          }
+          continue;
+        }
+        break;
+      }
+
+      if (!insertedCert) {
+        res.status(500).json({
+          ok: false,
+          error: `Impossible d’enregistrer le certificat (${lastInsertError?.message || 'erreur inconnue'}).`
+        });
+        return;
+      }
+
+      res.status(201).json({
+        ok: true,
+        alreadyIssued: false,
+        certificate: mapCertificateRow(insertedCert)
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur lors de la délivrance du certificat.'
+      });
+    }
+  });
+
+  app.get('/api/student/certificates/:certificateId/pdf', async (req, res) => {
+    const caller = await resolveCallerAuth(req);
+    if (!caller.userId) {
+      res.status(401).json({ ok: false, error: 'Authentification requise pour télécharger ce certificat.' });
+      return;
+    }
+
+    const certificateId = String(req.params.certificateId || '').trim();
+    if (!certificateId) {
+      res.status(400).json({ ok: false, error: 'Identifiant de certificat manquant.' });
+      return;
+    }
+
+    try {
+      let certRow: ServerCertificate | null = null;
+      let agencyLogoUrl: string | null = null;
+      let academyName = 'DJIFFA ACADEMY';
+      let parentAgencyName = 'DJIFFA DESIGN AGENCY';
+      let defaultDirectorName = 'Faith Ariola';
+
+      if (!supabaseAdmin) {
+        const localMatch = recentCertificates.find(
+          (c) => c.id === certificateId || c.verificationCode === certificateId
+        );
+        if (!localMatch) {
+          res.status(404).json({ ok: false, error: 'Certificat introuvable.' });
+          return;
+        }
+        if (!caller.isAdmin && localMatch.userId !== caller.userId) {
+          res.status(403).json({
+            ok: false,
+            error: 'Accès refusé : vous ne pouvez télécharger que vos propres certificats.'
+          });
+          return;
+        }
+        certRow = localMatch;
+      } else {
+        const [{ data: byIdRow, error: certErr }, { data: settingsRow }] = await Promise.all([
+          supabaseAdmin.from('certificates').select('*').eq('id', certificateId).maybeSingle(),
+          supabaseAdmin
+            .from('site_settings')
+            .select('*')
+            .eq('id', 'default')
+            .maybeSingle()
+        ]);
+
+        if (certErr) {
+          res.status(500).json({
+            ok: false,
+            error: `Impossible de récupérer le certificat (${certErr.message}).`
+          });
+          return;
+        }
+
+        if (!byIdRow) {
+          res.status(404).json({ ok: false, error: 'Certificat introuvable.' });
+          return;
+        }
+
+        const lookupUserIds = caller.isAdmin
+          ? new Set<string>()
+          : await resolveCallerLookupIds(caller.userId, caller.email);
+
+        if (!caller.isAdmin && !lookupUserIds.has(String(byIdRow.user_id || ''))) {
+          res.status(403).json({
+            ok: false,
+            error: 'Accès refusé : vous ne pouvez télécharger que vos propres certificats.'
+          });
+          return;
+        }
+
+        certRow = mapCertificateRow(byIdRow);
+        if (settingsRow) {
+          agencyLogoUrl = settingsRow.agency_logo_url || null;
+          academyName = String(settingsRow.academy_name || '').trim() || academyName;
+          parentAgencyName = String(settingsRow.parent_agency_name || '').trim() || parentAgencyName;
+          defaultDirectorName = String(settingsRow.director_name || '').trim() || defaultDirectorName;
+        }
+      }
+
+      const pdfBuffer = await generateCertificatePdfBuffer({
+        studentName: certRow.studentName,
+        courseTitle: certRow.courseTitle,
+        issuedDate: certRow.issuedDate,
+        verificationCode: certRow.verificationCode,
+        directorName: certRow.directorName || defaultDirectorName,
+        academyName,
+        parentAgencyName,
+        agencyLogoUrl
+      });
+
+      const safeFileCode = certRow.verificationCode.replace(/[^A-Za-z0-9_-]/g, '-');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Certificat-${safeFileCode}.pdf"`);
+      res.setHeader('Content-Length', String(pdfBuffer.length));
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.status(200).send(pdfBuffer);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Erreur lors de la génération du certificat PDF.'
       });
     }
   });
@@ -3386,7 +3889,7 @@ async function startServer() {
         supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: false }),
         supabaseAdmin.from('enrollments').select('*'),
         supabaseAdmin.from('lesson_progress').select('*'),
-        supabaseAdmin.from('certificates').select('*'),
+        supabaseAdmin.from('certificates').select('*').order('created_at', { ascending: false }),
         supabaseAdmin.from('orders').select('*').order('created_at', { ascending: false }),
         supabaseAdmin.from('coaching_requests').select('*').order('created_at', { ascending: false }),
         supabaseAdmin.from('course_private_contents').select('*')
